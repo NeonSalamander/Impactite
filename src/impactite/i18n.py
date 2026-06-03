@@ -79,6 +79,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Record #{id} saved to database": "Запись #{id} сохранена в БД",
         "Database write error: {error}": "Ошибка записи в БД: {error}",
         "Saved: {name}": "Сохранено: {name}",
+        # Избранное
+        "⭐ Favorites": "⭐ Избранное",
+        "Toggle favorite": "В избранное",
+        "Added to favorites": "Добавлено в избранное",
+        "Removed from favorites": "Удалено из избранного",
+        "Favorite": "Избранное",
     },
     "de": {
         # Виджеты / просмотр
@@ -137,6 +143,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Record #{id} saved to database": "Datensatz #{id} in DB gespeichert",
         "Database write error: {error}": "DB-Schreibfehler: {error}",
         "Saved: {name}": "Gespeichert: {name}",
+        # Избранное
+        "⭐ Favorites": "⭐ Favoriten",
+        "Toggle favorite": "Favorit umschalten",
+        "Added to favorites": "Zu Favoriten hinzugefügt",
+        "Removed from favorites": "Aus Favoriten entfernt",
+        "Favorite": "Favorit",
     },
 }
 

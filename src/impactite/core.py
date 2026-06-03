@@ -339,6 +339,9 @@ class TagIndex:
             CREATE INDEX IF NOT EXISTS idx_file        ON file_tags(file_path);
             CREATE INDEX IF NOT EXISTS idx_rec_source  ON form_records(form_source);
             CREATE INDEX IF NOT EXISTS idx_rec_catalog ON form_records(catalog);
+            CREATE TABLE IF NOT EXISTS favorites (
+                file_path TEXT PRIMARY KEY
+            );
         """)
         self._conn.commit()
 
@@ -465,6 +468,34 @@ class TagIndex:
                 "data": parsed, "created_at": created,
             })
         return result
+
+    # ---- избранное -----------------------------------------------------------
+
+    def add_favorite(self, file_path: str) -> None:
+        self._conn.execute("INSERT OR IGNORE INTO favorites VALUES(?)", (file_path,))
+        self._conn.commit()
+
+    def remove_favorite(self, file_path: str) -> None:
+        self._conn.execute("DELETE FROM favorites WHERE file_path=?", (file_path,))
+        self._conn.commit()
+
+    def toggle_favorite(self, file_path: str) -> bool:
+        if self.is_favorite(file_path):
+            self.remove_favorite(file_path)
+            return False
+        self.add_favorite(file_path)
+        return True
+
+    def is_favorite(self, file_path: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM favorites WHERE file_path=?", (file_path,)
+        ).fetchone()
+        return row is not None
+
+    def get_favorites(self) -> List[str]:
+        return [
+            r[0] for r in self._conn.execute("SELECT file_path FROM favorites ORDER BY file_path")
+        ]
 
     def close(self) -> None:
         self._conn.close()

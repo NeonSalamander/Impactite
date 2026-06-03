@@ -98,13 +98,25 @@ class FileTree(Tree):
         # Текущий выбранный каталог (для создания заметок/папок)
         self.selected_dir: Optional[Path] = None
 
-    def populate_tree(self, file_system: FileSystem):
+    def populate_tree(self, file_system: FileSystem, favorites: Optional[List[str]] = None):
         """Заполнить дерево файлами."""
         self.clear()
         self.file_nodes.clear()
         self.dir_nodes.clear()
         self.root_path = file_system.root_path
         self.root.expand()
+
+        if favorites:
+            existing: List[Path] = []
+            for f in favorites:
+                fp = Path(f).resolve()
+                if fp.exists():
+                    existing.append(fp)
+            if existing:
+                fav_node = self.root.add(_("⭐ Favorites"), expand=False)
+                for fp in existing:
+                    node = fav_node.add(f"⭐ {fp.name}")
+                    self.file_nodes[id(node)] = fp
 
         tree = file_system.get_tree()
         self._add_nodes(self.root, tree)
@@ -665,7 +677,7 @@ class TextPromptModal(ModalScreen[Optional[str]]):
 class MarkdownEditorApp(App):
     """Основное приложение."""
 
-    TITLE = "Markdown Editor"
+    TITLE = "Impactite"
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
@@ -676,6 +688,7 @@ class MarkdownEditorApp(App):
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
         Binding("ctrl+l", "toggle_theme", "Theme"),
+        Binding("ctrl+f", "toggle_favorite", "Favorite"),
     ]
 
     DEFAULT_CSS = """
@@ -919,6 +932,25 @@ class MarkdownEditorApp(App):
         self.tag_cache = self.tag_index.get_tag_files()
         self.tag_colors = self.tag_index.get_tag_colors()
 
+    def _refresh_file_tree(self) -> None:
+        """Перестроить дерево файлов с учётом избранного."""
+        self.query_one("#file-tree", FileTree).populate_tree(
+            self.file_system, self.tag_index.get_favorites()
+        )
+
+    def action_toggle_favorite(self) -> None:
+        """Добавить / убрать текущую заметку из избранного."""
+        if not self.current_file:
+            return
+        path_str = str(self.current_file)
+        is_fav = self.tag_index.toggle_favorite(path_str)
+        self.notify(
+            _("Added to favorites") if is_fav else _("Removed from favorites"),
+            severity="information",
+        )
+        self._refresh_file_tree()
+        self._update_status()
+
     def compose(self) -> ComposeResult:
         yield Header()
 
@@ -932,6 +964,9 @@ class MarkdownEditorApp(App):
                     new_note = ToolButton("+📄", id="new-note-btn", classes="sidebar-btn")
                     new_note.tooltip = _("Create note")
                     yield new_note
+                    fav_btn = ToolButton("⭐", id="toggle-fav-btn", classes="sidebar-btn")
+                    fav_btn.tooltip = _("Toggle favorite")
+                    yield fav_btn
                 yield FileTree("Файлы", id="file-tree")
                 with Vertical(id="tag-cloud-container"):
                     yield Label(f"[bold]{_('Tags')}[/bold]")
@@ -949,8 +984,7 @@ class MarkdownEditorApp(App):
         """Инициализация после монтирования."""
         retranslate_bindings(self)
         self.refresh_bindings()
-        file_tree = self.query_one("#file-tree", FileTree)
-        file_tree.populate_tree(self.file_system)
+        self._refresh_file_tree()
         self._update_tag_cloud()
 
         editor = self.query_one("#editor", TextArea)
@@ -1015,10 +1049,13 @@ class MarkdownEditorApp(App):
         """Обновить статус бар."""
         status = self.query_one("#status-bar", Static)
         mode = _("EDIT") if self.is_edit_mode else _("VIEW")
-        file_info = (
-            _("File: {name}", name=self.current_file.name)
-            if self.current_file else _("No file")
-        )
+        if self.current_file:
+            if self.tag_index.is_favorite(str(self.current_file)):
+                file_info = _("⭐ {name}", name=self.current_file.name)
+            else:
+                file_info = _("File: {name}", name=self.current_file.name)
+        else:
+            file_info = _("No file")
         status.update(_("{file} | Mode: {mode}", file=file_info, mode=mode))
 
     def on_file_tree_file_selected(self, event: FileTree.FileSelected):
@@ -1058,6 +1095,7 @@ class MarkdownEditorApp(App):
                 viewer.update_content(content)
                 viewer.focus()
 
+        self.title = f"Impactite — {self.current_file.name}"
         self._update_status()
 
     def action_toggle_edit(self):
@@ -1148,6 +1186,8 @@ class MarkdownEditorApp(App):
             self._prompt_new_folder()
         elif event.button_id == "new-note-btn":
             self._prompt_new_note()
+        elif event.button_id == "toggle-fav-btn":
+            self.action_toggle_favorite()
 
     def _current_catalog(self) -> Path:
         """Каталог для создания (выбранный в дереве, иначе корень заметок)."""
@@ -1163,7 +1203,7 @@ class MarkdownEditorApp(App):
                 return
             target = catalog / name
             if self.file_system.create_directory(target):
-                self.query_one("#file-tree", FileTree).populate_tree(self.file_system)
+                self._refresh_file_tree()
                 self.notify(_("Folder created: {name}", name=name), severity="information")
             else:
                 self.notify(_("Folder creation error"), severity="error")
@@ -1188,7 +1228,7 @@ class MarkdownEditorApp(App):
                 created = True
                 self._rebuild_tag_cache()
                 self._update_tag_cloud()
-            self.query_one("#file-tree", FileTree).populate_tree(self.file_system)
+            self._refresh_file_tree()
             # Сразу открыть новую заметку в режиме редактирования
             self.current_file = target
             self.is_edit_mode = True
@@ -1202,7 +1242,7 @@ class MarkdownEditorApp(App):
     def action_refresh(self):
         """Обновить список файлов."""
         file_tree = self.query_one("#file-tree", FileTree)
-        file_tree.populate_tree(self.file_system)
+        self._refresh_file_tree()
         self._rebuild_tag_cache()
         self._update_tag_cloud()
         self.notify(_("File list refreshed"), severity="information")
@@ -1265,7 +1305,7 @@ class MarkdownEditorApp(App):
         if self.file_system.write_file(filepath, file_content):
             self._rebuild_tag_cache()
             self._update_tag_cloud()
-            self.query_one("#file-tree", FileTree).populate_tree(self.file_system)
+            self._refresh_file_tree()
             self.notify(_("Saved: {name}", name=filepath.name), severity="information")
         else:
             self.notify(_("Save error"), severity="error")

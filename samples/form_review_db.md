@@ -1,6 +1,6 @@
 ---
 type: form
-destination: database
+destination: note
 catalog: reviews
 fields:
   - book: ["Book", string, 80]
