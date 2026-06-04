@@ -13,3 +13,6 @@ Visit [Impactite](https://github.com/impactite) for more info.
 
 1. Numbered *italic*
 2. Numbered **bold**
+
+
+[Внутренняя ссылка](_README.md)

@@ -250,6 +250,12 @@ class MarkdownViewer(Static):
             self.source_line = source_line
             super().__init__()
 
+    class LinkClicked(Message):
+        def __init__(self, target: str, text: str) -> None:
+            self.target = target
+            self.text = text
+            super().__init__()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._content = ""
@@ -258,6 +264,8 @@ class MarkdownViewer(Static):
         self._tag_lines: list = []
         # Информация о чекбоксах: None или dict с позицией
         self._checkbox_lines: list = []
+        # Информация о внутренних ссылках: None или список dict'ов
+        self._link_lines: list = []
 
     def compose(self):
         yield ViewerLog(markup=True, highlight=False, wrap=True)
@@ -270,18 +278,27 @@ class MarkdownViewer(Static):
     def action_scroll_end(self)  -> None: self.query_one(ViewerLog).scroll_end()
 
     def on_viewer_log_clicked(self, event: ViewerLog.Clicked) -> None:
-        """Обработать клик по тексту заметки — чекбокс или тег."""
+        """Обработать клик по тексту заметки — ссылка, чекбокс или тег."""
         log = self.query_one(ViewerLog)
         cr = log.content_region          # абсолютные экранные координаты контента
         line_idx = event.screen_y - cr.y + int(log.scroll_y)
         if not (0 <= line_idx < len(self._tag_lines)):
             return
+        col = event.screen_x - cr.x
+
+        # Внутренняя ссылка?
+        if line_idx < len(self._link_lines):
+            link_data = self._link_lines[line_idx]
+            if link_data:
+                for link in link_data:
+                    if link["start"] <= col <= link["end"]:
+                        self.post_message(self.LinkClicked(link["target"], link["text"]))
+                        return
 
         # Чекбокс?
         if line_idx < len(self._checkbox_lines):
             cb_info = self._checkbox_lines[line_idx]
             if cb_info:
-                col = event.screen_x - cr.x
                 if cb_info["cb_start"] <= col <= cb_info["cb_end"]:
                     self.post_message(self.CheckboxToggled(cb_info["source_line"]))
                     return
@@ -290,7 +307,7 @@ class MarkdownViewer(Static):
         if not entry:
             return
         tags, plain = entry
-        tag = self._tag_at_col(plain, tags, event.screen_x - cr.x) or tags[0]
+        tag = self._tag_at_col(plain, tags, col) or tags[0]
         self.post_message(self.TagClicked(tag))
 
     @staticmethod
@@ -307,6 +324,7 @@ class MarkdownViewer(Static):
         self._content = content
         self._tag_lines = []
         self._checkbox_lines = []
+        self._link_lines = []
         log = self.query_one(ViewerLog)
         log.clear()
 
@@ -314,6 +332,7 @@ class MarkdownViewer(Static):
             log.write(f"[italic]{_('Select a file to view')}[/italic]")
             self._tag_lines.append(None)
             self._checkbox_lines.append(None)
+            self._link_lines.append(None)
             return
 
         lines = content.split("\n")
@@ -348,6 +367,7 @@ class MarkdownViewer(Static):
                     for _ in range(height):
                         self._tag_lines.append(None)
                         self._checkbox_lines.append(None)
+                        self._link_lines.append(None)
                     in_code_block = False
                 continue
 
@@ -362,16 +382,20 @@ class MarkdownViewer(Static):
                 is_checked = checked.lower() == 'x'
                 prefix = " " * len(indent_str)
                 checkbox_display = f"[bold green]{escape('[x]')}[/bold green]" if is_checked else f"[bold red]{escape('[ ]')}[/bold red]"
-                formatted_text = self._process_formatting_inline(text)
+                formatted_text, links = self._process_formatting_inline(text)
                 log.write(f"{prefix}{checkbox_display} {formatted_text}")
                 cb_start = len(prefix)
                 cb_end = cb_start + 3
+                offset = len(prefix) + len(checkbox_display) + 1
+                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                              "target": l["target"], "text": l["text"]} for l in links] if links else None
                 self._checkbox_lines.append({
                     "source_line": line_idx,
                     "cb_start": cb_start,
                     "cb_end": cb_end,
                 })
                 self._tag_lines.append(None)
+                self._link_lines.append(link_data)
                 continue
 
             # Заголовки
@@ -379,33 +403,48 @@ class MarkdownViewer(Static):
                 log.write(f"[bold magenta]{line[2:]}[/bold magenta]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
             elif line.startswith("## "):
                 log.write(f"[bold blue]{line[3:]}[/bold blue]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
             elif line.startswith("### "):
                 log.write(f"[bold green]{line[4:]}[/bold green]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
             # Списки
             elif line.startswith("- ") or line.startswith("* "):
-                text = self._process_formatting_inline(line[2:])
+                text, links = self._process_formatting_inline(line[2:])
                 log.write(f"  • {text}")
+                offset = 4
+                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                              "target": l["target"], "text": l["text"]} for l in links] if links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(link_data)
             elif re.match(r"^\d+\. ", line):
                 match = re.match(r"^(\d+)\. (.*)", line)
                 if match:
-                    text = self._process_formatting_inline(match.group(2))
+                    text, links = self._process_formatting_inline(match.group(2))
                     log.write(f"  {match.group(1)}. {text}")
+                    offset = len(f"  {match.group(1)}. ")
+                    link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                                  "target": l["target"], "text": l["text"]} for l in links] if links else None
                     self._tag_lines.append(None)
                     self._checkbox_lines.append(None)
+                    self._link_lines.append(link_data)
             # Цитаты
             elif line.startswith("> "):
-                text = self._process_formatting_inline(line[2:])
+                text, links = self._process_formatting_inline(line[2:])
                 log.write(f"[italic yellow]  {text}[/italic yellow]")
+                offset = 2
+                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                              "target": l["target"], "text": l["text"]} for l in links] if links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(link_data)
             # Теги
             elif re.search(r"#\w+", line):
                 try:
@@ -427,27 +466,58 @@ class MarkdownViewer(Static):
                 log.write(formatted)
                 self._tag_lines.append((tags_in_line, line))
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
             # Inline-форматирование
             elif any(m in line for m in ("**", "__", "~~", "*", "_[", "](")):
-                formatted = self._process_formatting_inline(line)
+                formatted, links = self._process_formatting_inline(line)
                 log.write(formatted)
+                link_data = [{"start": l["start"], "end": l["end"],
+                              "target": l["target"], "text": l["text"]} for l in links] if links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(link_data)
             # Пустые строки
             elif not line.strip():
                 log.write("")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
             # Обычный текст
             else:
                 log.write(line)
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
+                self._link_lines.append(None)
 
-    def _process_formatting_inline(self, line: str) -> str:
-        """Обработать inline-форматирование markdown."""
-        # Ссылки [text](url)
-        line = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'[link=\2]\1[/link]', line)
+    def _process_formatting_inline(self, line: str) -> tuple[str, list]:
+        """Обработать inline-форматирование markdown.
+
+        Возвращает (отформатированная строка, список внутренних ссылок).
+        Каждая ссылка: dict(start, end, target, text) — позиции в отформатированной строке.
+        """
+        links: list = []
+        parts: list = []
+        last_end = 0
+        for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line):
+            text = match.group(1)
+            url = match.group(2)
+            parts.append(line[last_end:match.start()])
+            if re.match(r'^(https?://|mailto:)', url):
+                link_markup = f'[link={url}]{text}[/link]'
+            else:
+                start_pos = sum(len(p) for p in parts)
+                links.append({
+                    "start": start_pos,
+                    "end": start_pos + len(text) - 1,
+                    "target": url,
+                    "text": text,
+                })
+                link_markup = f'[underline blue]{text}[/underline blue]'
+            parts.append(link_markup)
+            last_end = match.end()
+        parts.append(line[last_end:])
+        line = ''.join(parts)
+
         # **жирный**
         line = re.sub(r"\*\*(.+?)\*\*", r"[bold]\1[/bold]", line)
         # __жирный__
@@ -458,7 +528,7 @@ class MarkdownViewer(Static):
         line = re.sub(r"\*(.+?)\*", r"[italic]\1[/italic]", line)
         # _курсив_
         line = re.sub(r"_(.+?)_", r"[italic]\1[/italic]", line)
-        return line
+        return line, links
 
     def _render_query_block(self, log: "ViewerLog", query_text: str) -> int:
         """Выполнить псевдо-SQL запрос и отрендерить результат таблицей.
@@ -795,6 +865,7 @@ class MarkdownEditorApp(App):
         Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
         Binding("ctrl+l", "toggle_theme", "Theme"),
         Binding("ctrl+f", "toggle_favorite", "Favorite"),
+        Binding("backspace", "go_back", "Back", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -1058,6 +1129,7 @@ class MarkdownEditorApp(App):
         self.tag_colors: Dict[str, str] = {}
         self._original_content: str = ""
         self._last_editor_selection = None
+        self._file_history: List[Path] = []
         self.tag_index = TagIndex(self.file_system.root_path)
         self.query_engine = QueryEngine(self.file_system, self.parser, self.tag_index)
         self._rebuild_tag_cache()
@@ -1196,10 +1268,26 @@ class MarkdownEditorApp(App):
             file_info = _("No file")
         status.update(_("{file} | Mode: {mode}", file=file_info, mode=mode))
 
+    def _navigate_to(self, path: Path) -> None:
+        """Открыть файл, сохранив текущий в историю навигации."""
+        if self.current_file and self.current_file != path:
+            self._file_history.append(self.current_file)
+        self.current_file = path
+        self._load_file()
+
+    def action_go_back(self) -> None:
+        """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра)."""
+        if self.is_edit_mode:
+            return
+        if not self._file_history:
+            return
+        prev = self._file_history.pop()
+        self.current_file = prev
+        self._load_file()
+
     def on_file_tree_file_selected(self, event: FileTree.FileSelected):
         """Обработать выбор файла."""
-        self.current_file = event.path
-        self._load_file()
+        self._navigate_to(event.path)
 
     def _load_file(self):
         """Загрузить текущий файл."""
@@ -1310,6 +1398,18 @@ class MarkdownEditorApp(App):
     def on_markdown_viewer_tag_clicked(self, event: MarkdownViewer.TagClicked) -> None:
         """Клик по тегу в тексте заметки — открыть поиск."""
         self.push_screen(TagSearchModal(self.tag_cache, initial_query=event.tag, tag_colors=self.tag_colors))
+
+    def on_markdown_viewer_link_clicked(self, event: MarkdownViewer.LinkClicked) -> None:
+        """Клик по внутренней ссылке — открыть связанную заметку."""
+        if not self.current_file:
+            return
+        target = Path(event.target)
+        if not target.is_absolute():
+            target = (self.current_file.parent / target).resolve()
+        if target.exists() and target.is_file():
+            self._navigate_to(target)
+        else:
+            self.notify(_("File not found: {path}", path=str(target)), severity="error")
 
     def on_markdown_viewer_checkbox_toggled(self, event: MarkdownViewer.CheckboxToggled) -> None:
         """Переключить чекбокс в markdown-файле и сохранить."""
@@ -1495,7 +1595,7 @@ class MarkdownEditorApp(App):
                 self._update_tag_cloud()
             self._refresh_file_tree()
             # Сразу открыть новую заметку в режиме редактирования
-            self.current_file = target
+            self._navigate_to(target)
             self.is_edit_mode = True
             self._load_file()
             self.query_one("#editor", TextArea).focus()
@@ -1581,8 +1681,7 @@ class MarkdownEditorApp(App):
 
     def on_tag_search_modal_file_selected(self, event: TagSearchModal.FileSelected):
         """Обработать выбор файла из поиска."""
-        self.current_file = event.path
-        self._load_file()
+        self._navigate_to(event.path)
 
     def on_unmount(self) -> None:
         self.tag_index.close()
