@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -197,12 +198,19 @@ class MarkdownViewer(Static):
             self.tag = tag
             super().__init__()
 
+    class CheckboxToggled(Message):
+        def __init__(self, source_line: int) -> None:
+            self.source_line = source_line
+            super().__init__()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._content = ""
         # Каждый элемент соответствует одной визуальной строке:
         # None — строка без тегов, (tags, plain_text) — строка с тегами
         self._tag_lines: list = []
+        # Информация о чекбоксах: None или dict с позицией
+        self._checkbox_lines: list = []
 
     def compose(self):
         yield ViewerLog(markup=True, highlight=False, wrap=True)
@@ -215,12 +223,22 @@ class MarkdownViewer(Static):
     def action_scroll_end(self)  -> None: self.query_one(ViewerLog).scroll_end()
 
     def on_viewer_log_clicked(self, event: ViewerLog.Clicked) -> None:
-        """Обработать клик по тексту заметки — найти тег под курсором."""
+        """Обработать клик по тексту заметки — чекбокс или тег."""
         log = self.query_one(ViewerLog)
         cr = log.content_region          # абсолютные экранные координаты контента
         line_idx = event.screen_y - cr.y + int(log.scroll_y)
         if not (0 <= line_idx < len(self._tag_lines)):
             return
+
+        # Чекбокс?
+        if line_idx < len(self._checkbox_lines):
+            cb_info = self._checkbox_lines[line_idx]
+            if cb_info:
+                col = event.screen_x - cr.x
+                if cb_info["cb_start"] <= col <= cb_info["cb_end"]:
+                    self.post_message(self.CheckboxToggled(cb_info["source_line"]))
+                    return
+
         entry = self._tag_lines[line_idx]
         if not entry:
             return
@@ -241,12 +259,14 @@ class MarkdownViewer(Static):
         """Обновить содержимое."""
         self._content = content
         self._tag_lines = []
+        self._checkbox_lines = []
         log = self.query_one(ViewerLog)
         log.clear()
 
         if not content:
             log.write(f"[italic]{_('Select a file to view')}[/italic]")
             self._tag_lines.append(None)
+            self._checkbox_lines.append(None)
             return
 
         lines = content.split("\n")
@@ -254,7 +274,7 @@ class MarkdownViewer(Static):
         code_lines = []
         code_language = ""
 
-        for line in lines:
+        for line_idx, line in enumerate(lines):
             code_match = re.match(r"^```(\w*)", line)
             if code_match:
                 if not in_code_block:
@@ -280,6 +300,7 @@ class MarkdownViewer(Static):
                     # блок занимает примерно height визуальных строк
                     for _ in range(height):
                         self._tag_lines.append(None)
+                        self._checkbox_lines.append(None)
                     in_code_block = False
                 continue
 
@@ -287,29 +308,54 @@ class MarkdownViewer(Static):
                 code_lines.append(line)
                 continue
 
+            # Чекбоксы
+            cb_match = re.match(r'^(\s*)([-*])\s+\[([ xX])\]\s+(.*)', line)
+            if cb_match:
+                indent_str, _bullet, checked, text = cb_match.groups()
+                is_checked = checked.lower() == 'x'
+                prefix = " " * len(indent_str)
+                checkbox_display = f"[bold green]{escape('[x]')}[/bold green]" if is_checked else f"[bold red]{escape('[ ]')}[/bold red]"
+                formatted_text = self._process_formatting_inline(text)
+                log.write(f"{prefix}{checkbox_display} {formatted_text}")
+                cb_start = len(prefix)
+                cb_end = cb_start + 3
+                self._checkbox_lines.append({
+                    "source_line": line_idx,
+                    "cb_start": cb_start,
+                    "cb_end": cb_end,
+                })
+                self._tag_lines.append(None)
+                continue
+
             # Заголовки
             if line.startswith("# "):
                 log.write(f"[bold magenta]{line[2:]}[/bold magenta]")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             elif line.startswith("## "):
                 log.write(f"[bold blue]{line[3:]}[/bold blue]")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             elif line.startswith("### "):
                 log.write(f"[bold green]{line[4:]}[/bold green]")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             # Списки
             elif line.startswith("- ") or line.startswith("* "):
                 log.write(f"  • {line[2:]}")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             elif re.match(r"^\d+\. ", line):
                 match = re.match(r"^(\d+)\. (.*)", line)
                 if match:
                     log.write(f"  {match.group(1)}. {match.group(2)}")
                     self._tag_lines.append(None)
+                    self._checkbox_lines.append(None)
             # Цитаты
             elif line.startswith("> "):
                 log.write(f"[italic yellow]  {line[2:]}[/italic yellow]")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             # Теги
             elif re.search(r"#\w+", line):
                 try:
@@ -330,19 +376,23 @@ class MarkdownViewer(Static):
                         formatted += part
                 log.write(formatted)
                 self._tag_lines.append((tags_in_line, line))
+                self._checkbox_lines.append(None)
             # Жирный/курсив
             elif "**" in line or "__" in line:
                 formatted = self._process_formatting_inline(line)
                 log.write(formatted)
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             # Пустые строки
             elif not line.strip():
                 log.write("")
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
             # Обычный текст
             else:
                 log.write(line)
                 self._tag_lines.append(None)
+                self._checkbox_lines.append(None)
 
     def _process_formatting_inline(self, line: str) -> str:
         """Обработать жирный и курсивный текст."""
@@ -1171,6 +1221,31 @@ class MarkdownEditorApp(App):
     def on_markdown_viewer_tag_clicked(self, event: MarkdownViewer.TagClicked) -> None:
         """Клик по тегу в тексте заметки — открыть поиск."""
         self.push_screen(TagSearchModal(self.tag_cache, initial_query=event.tag, tag_colors=self.tag_colors))
+
+    def on_markdown_viewer_checkbox_toggled(self, event: MarkdownViewer.CheckboxToggled) -> None:
+        """Переключить чекбокс в markdown-файле и сохранить."""
+        if not self.current_file or self.is_edit_mode:
+            return
+        content = self.file_system.read_file(self.current_file)
+        lines = content.split("\n")
+        if not (0 <= event.source_line < len(lines)):
+            return
+        old_line = lines[event.source_line]
+        match = re.search(r'\[([ xX])\]', old_line)
+        if not match:
+            return
+        current_checked = match.group(1).lower() == 'x'
+        new_char = ' ' if current_checked else 'x'
+        new_line = old_line[:match.start()] + f'[{new_char}]' + old_line[match.end():]
+        lines[event.source_line] = new_line
+        new_content = "\n".join(lines)
+        if self.file_system.write_file(self.current_file, new_content):
+            viewer = self.query_one("#viewer", MarkdownViewer)
+            viewer.update_content(new_content)
+            self._rebuild_tag_cache()
+            self._update_tag_cloud()
+        else:
+            self.notify(_("Save error"), severity="error")
 
     def on_tag_cloud_tag_clicked(self, event: TagCloud.TagClicked) -> None:
         """Открыть поиск с предзаполненным тегом по клику в облаке тегов."""

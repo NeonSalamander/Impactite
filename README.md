@@ -9,6 +9,7 @@ Python with the **Rich** and **Textual** libraries.
 
 - 📁 **File tree** — navigate files and folders in the left panel
 - 👁️ **View mode** — rendered Markdown with formatting and scrolling
+- ✅ **Interactive checkboxes** — click task list checkboxes (`- [ ]` / `- [x]`) in view mode to toggle and save them instantly
 - ✏️ **Edit mode** — Markdown syntax highlighting and code highlighting in fenced blocks
 - 🏷️ **Tag cloud** — all tags with individual colors, clickable
 - 🔍 **Tag search** — modal window with clickable results
@@ -506,6 +507,16 @@ def hello():
     print("Hello, World!")
 ```
 ````
+
+### Interactive checkboxes
+
+Task list items are clickable in view mode — a click toggles the checkbox and saves the file immediately.
+
+```markdown
+- [x] Write the parser
+- [ ] Add tests
+- [ ] Update documentation
+```
 
 ### Tags
 

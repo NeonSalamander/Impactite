@@ -9,6 +9,7 @@ Obsidian, geschrieben in Python mit den Bibliotheken **Rich** und **Textual**.
 
 - 📁 **Dateibaum** — Navigation durch Dateien und Ordner im linken Bereich
 - 👁️ **Ansichtsmodus** — gerendertes Markdown mit Formatierung und Scrollen
+- ✅ **Interaktive Checkboxen** — klicken Sie auf Aufgabenlisten-Checkboxen (`- [ ]` / `- [x]`) im Ansichtsmodus, um sie umzuschalten und sofort zu speichern
 - ✏️ **Bearbeitungsmodus** — Markdown-Syntaxhervorhebung und Code-Hervorhebung in Codeblöcken
 - 🏷️ **Tag-Wolke** — alle Tags mit individuellen Farben, anklickbar
 - 🔍 **Tag-Suche** — modales Fenster mit anklickbaren Ergebnissen
@@ -511,6 +512,16 @@ def hello():
     print("Hello, World!")
 ```
 ````
+
+### Interaktive Checkboxen
+
+Aufgabenlisteneinträge sind im Ansichtsmodus anklickbar — ein Klick schaltet die Checkbox um und speichert die Datei sofort.
+
+```markdown
+- [x] Den Parser schreiben
+- [ ] Tests hinzufügen
+- [ ] Dokumentation aktualisieren
+```
 
 ### Tags
 
