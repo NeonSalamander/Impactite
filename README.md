@@ -13,7 +13,8 @@ Python with the **Rich** and **Textual** libraries.
 - ✏️ **Edit mode** — Markdown syntax highlighting and code highlighting in fenced blocks, with a formatting toolbar
 - 🏷️ **Tag cloud** — all tags with individual colors, clickable
 - 🔍 **Tag search** — modal window with clickable results
-- 🎨 **Light/dark theme** — toggle on the fly, your choice is remembered
+- 🕸️ **Link graph** — hierarchical tree of note-tag relationships; all nodes clickable (notes open, tags search)
+- 🎨 **Light/dark theme** — toggle on the fly or via the command palette; your choice is saved automatically
 - 🌐 **Interface localization** — English, Russian, German
 - 📝 **Input forms** — form notes with fields, saved to a file or a database
 - 🧮 **Pseudo-SQL queries** — embeddable queries over notes and the database (Dataview-style)
@@ -115,7 +116,7 @@ impactite/
 │   ├── i18n.py             # Localization (en/ru/de)
 │   └── editor.tcss         # (unused — kept for compatibility)
 └── notes/                  # Notes folder (default)
-    └── .ladybug_index.lbug   # LadybugDB: tag index, colors, form records, favorites
+    └── .tag_index.db       # SQLite: tag index, colors, form records, favorites, note links
 ```
 
 ---
@@ -184,8 +185,9 @@ tags:
 Dark: `textual-dark`, `dracula`, `monokai`, `nord`, `gruvbox`, `tokyo-night`, …
 Light: `textual-light`, `solarized-light`, `catppuccin-latte`, `rose-pine-dawn`, `atom-one-light`.
 
-`Ctrl+L` toggles the light/dark theme right inside the app, and the choice is
-written back to `config.yaml` (the `app_theme` field).
+`Ctrl+L` toggles the light/dark theme, and the choice is automatically saved
+to `config.yaml` (the `app_theme` field) — no matter whether you toggle via the
+hotkey or the command palette.
 
 ---
 
@@ -210,6 +212,23 @@ On startup all notes are scanned and the tag index is stored in the LadybugDB
 database `.ladybug_index.lbug` inside the notes folder. Each tag is deterministically
 assigned a unique color (saved in the DB). The tag cloud in the bottom-left and
 the tags within the text are clickable — a click opens search for that tag.
+
+---
+
+## Link graph
+
+The **🕸️ Link graph** is a predefined node in the sidebar (alongside ⭐ Favorites).
+It opens a hierarchical tree that visualizes the relationships between your notes
+and tags:
+
+- **Tags** are the top-level branches (colored, clickable → opens tag search)
+- **Notes** are nested under the tags they contain (clickable → opens the note)
+- **Internal links** between notes (`[text](other.md)`) are followed and shown as
+  nested connections
+- **Back-links** (notes that link to the current one) are also displayed
+- All nodes are **expanded by default** so the full structure is visible at a glance
+
+When you open a note from the graph, press `Backspace` to return to the graph.
 
 ---
 
@@ -488,6 +507,7 @@ ORDER BY amount DESC
 | `Ctrl+R` | Refresh the file list |
 | `Ctrl+B` | Show/hide the sidebar |
 | `Ctrl+Q` | Quit |
+| `Backspace` | Go back to the previous note (or back to the link graph) |
 | `Escape` | Close search/dialog; exit the editor (with a save prompt) |
 
 In view mode scrolling is available: arrows `↑`/`↓`, `PgUp`/`PgDown`, `Home`/`End`.

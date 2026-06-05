@@ -262,6 +262,23 @@ class MarkdownParser:
         except Exception:
             return set()
 
+    def extract_internal_links(self, content: str) -> Set[str]:
+        """Извлечь внутренние ссылки на другие заметки (не URL/почта)."""
+        links: Set[str] = set()
+        for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', content):
+            url = match.group(2)
+            if not re.match(r'^(https?://|mailto:)', url):
+                links.add(url)
+        return links
+
+    def extract_internal_links_from_file(self, path: Path) -> Set[str]:
+        """Извлечь внутренние ссылки из файла."""
+        try:
+            content = path.read_text(encoding="utf-8")
+            return self.extract_internal_links(content)
+        except Exception:
+            return set()
+
     def find_files_by_tag(self, files: List[Path], tag: str) -> List[Tuple[Path, str]]:
         """Найти файлы, содержащие указанный тег."""
         results = []
@@ -378,14 +395,45 @@ class TagIndex:
         r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
-
-
-    def close(self) -> None:
-        """Close the LadybugDB connection"""
-        if hasattr(self, 'connection'):
-            self.connection.close()
-        if hasattr(self, 'database'):
-            self.database.close()
+    def _init_schema(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS file_tags (
+                tag       TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                source    TEXT NOT NULL,
+                PRIMARY KEY (tag, file_path, source)
+            );
+            CREATE TABLE IF NOT EXISTS file_mtimes (
+                file_path TEXT PRIMARY KEY,
+                mtime     REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tag_colors (
+                tag   TEXT PRIMARY KEY,
+                color TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS form_records (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                form_source TEXT NOT NULL,
+                catalog     TEXT NOT NULL DEFAULT '',
+                data        TEXT NOT NULL,
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tag         ON file_tags(tag);
+            CREATE INDEX IF NOT EXISTS idx_file        ON file_tags(file_path);
+            CREATE INDEX IF NOT EXISTS idx_rec_source  ON form_records(form_source);
+            CREATE INDEX IF NOT EXISTS idx_rec_catalog ON form_records(catalog);
+            CREATE TABLE IF NOT EXISTS favorites (
+                file_path TEXT PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS note_links (
+                source_path TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                PRIMARY KEY (source_path, target_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_link_source ON note_links(source_path);
+            CREATE INDEX IF NOT EXISTS idx_note_link_target ON note_links(target_path);
+        """)
+        self._conn.commit()
 
     def rebuild(self, files: List[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить индекс.
@@ -594,6 +642,59 @@ class TagIndex:
             "form_id": form_id,
             "file_path": file_path
         })
+
+    def rebuild_note_links(self, files: List[Path], parser: MarkdownParser) -> None:
+        """Инкрементально обновить связи между заметками.
+
+        Использует те же file_mtimes для определения изменённых файлов.
+        Удаляет связи для удалённых файлов.
+        """
+        current = {str(f) for f in files}
+        cached = {row[0] for row in self._conn.execute("SELECT file_path FROM file_mtimes")}
+
+        # Удалить связи для удалённых файлов (как source, так и target)
+        for stale in cached - current:
+            self._conn.execute("DELETE FROM note_links WHERE source_path=?", (stale,))
+            self._conn.execute("DELETE FROM note_links WHERE target_path=?", (stale,))
+
+        for fp in files:
+            path_str = str(fp)
+            try:
+                mtime = fp.stat().st_mtime
+            except OSError:
+                continue
+
+            row = self._conn.execute(
+                "SELECT mtime FROM file_mtimes WHERE file_path=?", (path_str,)
+            ).fetchone()
+            if row and abs(row[0] - mtime) < 0.001:
+                continue
+
+            # Файл изменился — перестраиваем его связи
+            self._conn.execute("DELETE FROM note_links WHERE source_path=?", (path_str,))
+            raw_links = parser.extract_internal_links_from_file(fp)
+            for link in raw_links:
+                target = Path(link)
+                if not target.is_absolute():
+                    target = (fp.parent / target).resolve()
+                else:
+                    target = target.resolve()
+                if target.exists() and target.is_file():
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO note_links VALUES(?,?)",
+                        (path_str, str(target)),
+                    )
+
+        self._conn.commit()
+
+    def get_note_links(self) -> Dict[Path, Set[Path]]:
+        """Вернуть {source: {target, ...}} по всем связям."""
+        result: Dict[Path, Set[Path]] = {}
+        for src, tgt in self._conn.execute(
+            "SELECT source_path, target_path FROM note_links"
+        ):
+            result.setdefault(Path(src), set()).add(Path(tgt))
+        return result
 
     def get_tag_files(self) -> Dict[str, List[Path]]:
         """Вернуть {тег: [Path, ...]} по всем проиндексированным файлам."""
