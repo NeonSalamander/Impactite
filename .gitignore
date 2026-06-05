@@ -1,2 +1,69 @@
+# ====== Python / Django ======
+# Байт-код и кэш
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+
+# Виртуальное окружение
+venv/
+env/
+.venv/
+environment/
+
+# Переменные окружения и секреты
+.env
+.env.local
+.env.*.local
+local_settings.py
+.claude/
+# База данных SQLite
+db.sqlite3
+db.sqlite3-journal
+
+# Медиа и статика (если собираете локально)
+media/
+staticfiles/
+collected_static/
+
+# Лог-файлы
+*.log
+logs/
+
+# Окружение разработки IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# Сборка и дистрибуция
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Тестирование и покрытие
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Документация
+docs/_build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# SciPy / Pandas
+*.scipy
+
 .rpiv
 samples/.ladybug_index.lbug
