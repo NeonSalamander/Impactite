@@ -15,7 +15,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -90,6 +90,11 @@ class FileTree(Tree):
             self.path = path
             super().__init__()
 
+    class GraphSelected(Message):
+        """Сообщение о выборе графа связей."""
+
+        pass
+
     def __init__(self, root_label: str, **kwargs):
         super().__init__(root_label, **kwargs)
         self.show_root = False
@@ -98,14 +103,20 @@ class FileTree(Tree):
         self.root_path: Optional[Path] = None
         # Текущий выбранный каталог (для создания заметок/папок)
         self.selected_dir: Optional[Path] = None
+        self.graph_node_id: Optional[int] = None
 
     def populate_tree(self, file_system: FileSystem, favorites: Optional[List[str]] = None):
         """Заполнить дерево файлами."""
         self.clear()
         self.file_nodes.clear()
         self.dir_nodes.clear()
+        self.graph_node_id = None
         self.root_path = file_system.root_path
         self.root.expand()
+
+        # Граф связей — предопределённый узел
+        graph_node = self.root.add(_("🕸️ Link graph"), expand=False)
+        self.graph_node_id = id(graph_node)
 
         if favorites:
             existing: List[Path] = []
@@ -141,7 +152,9 @@ class FileTree(Tree):
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """Обработать выбор узла."""
         node_id = id(event.node)
-        if node_id in self.file_nodes:
+        if node_id == self.graph_node_id:
+            self.post_message(self.GraphSelected())
+        elif node_id in self.file_nodes:
             # Каталог для создания — папка, в которой лежит выбранный файл
             self.selected_dir = self.file_nodes[node_id].parent
             self.post_message(self.FileSelected(self.file_nodes[node_id]))
@@ -691,6 +704,123 @@ class FormView(VerticalScroll):
             self.post_message(self.Cancelled())
 
 
+class LinkGraphTree(Tree):
+    """Дерево иерархических связей заметок и тегов."""
+
+    class NoteSelected(Message):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            super().__init__()
+
+    class TagSelected(Message):
+        def __init__(self, tag: str) -> None:
+            self.tag = tag
+            super().__init__()
+
+    def __init__(self, **kwargs):
+        super().__init__("", **kwargs)
+        self.show_root = False
+        self._tag_cache: Dict[str, List[Path]] = {}
+        self._tag_colors: Dict[str, str] = {}
+        self._note_links: Dict[Path, Set[Path]] = {}
+        self._all_md_files: Set[Path] = set()
+
+    def build_graph(
+        self,
+        tag_cache: Dict[str, List[Path]],
+        tag_colors: Dict[str, str],
+        note_links: Dict[Path, Set[Path]],
+        all_md_files: List[Path],
+    ) -> None:
+        """Построить иерархическое дерево связей."""
+        self.clear()
+        self._tag_cache = tag_cache
+        self._tag_colors = tag_colors
+        self._note_links = note_links
+        self._all_md_files = set(all_md_files)
+
+        if not tag_cache and not note_links:
+            self.root.add(_("No data for graph"))
+            return
+
+        # Собираем обратные связи: кто ссылается на заметку
+        back_links: Dict[Path, Set[Path]] = {}
+        for src, targets in note_links.items():
+            for t in targets:
+                back_links.setdefault(t, set()).add(src)
+
+        # Тег -> заметки
+        tag_to_notes: Dict[str, Set[Path]] = {}
+        for tag, files in tag_cache.items():
+            tag_to_notes.setdefault(tag, set()).update(files)
+
+        # Заметка -> теги
+        note_to_tags: Dict[Path, Set[str]] = {}
+        for tag, files in tag_cache.items():
+            for f in files:
+                note_to_tags.setdefault(f, set()).add(tag)
+
+        visited_notes: Set[Path] = set()
+        visited_tags: Set[str] = set()
+
+        def add_note(parent, note: Path, depth: int = 0):
+            if note in visited_notes or depth > 10:
+                return
+            visited_notes.add(note)
+            label = f"📄 {note.name}"
+            node = parent.add(label, expand=True, data={"type": "note", "value": note})
+            # Теги заметки
+            for tag in sorted(note_to_tags.get(note, [])):
+                if tag not in visited_tags:
+                    color = self._tag_colors.get(tag, "cyan")
+                    tag_node = node.add(
+                        f"[bold {color}]#{tag}[/bold {color}]",
+                        expand=True,
+                        data={"type": "tag", "value": tag},
+                    )
+                    visited_tags.add(tag)
+                    # Другие заметки с этим тегом
+                    for other in sorted(tag_to_notes.get(tag, set())):
+                        if other != note and other not in visited_notes:
+                            add_note(tag_node, other, depth + 1)
+            # Прямые ссылки из заметки
+            for target in sorted(self._note_links.get(note, set())):
+                if target not in visited_notes:
+                    add_note(node, target, depth + 1)
+            # Обратные ссылки
+            for src in sorted(back_links.get(note, set())):
+                if src not in visited_notes:
+                    add_note(node, src, depth + 1)
+
+        # Начинаем с тегов верхнего уровня
+        for tag in sorted(tag_cache.keys()):
+            if tag not in visited_tags:
+                color = self._tag_colors.get(tag, "cyan")
+                tag_node = self.root.add(
+                    f"[bold {color}]#{tag}[/bold {color}]",
+                    expand=True,
+                    data={"type": "tag", "value": tag},
+                )
+                visited_tags.add(tag)
+                for note in sorted(tag_to_notes.get(tag, set())):
+                    add_note(tag_node, note)
+
+        # Заметки без тегов, но со ссылками
+        for note in sorted(all_md_files):
+            if note not in visited_notes:
+                if note in self._note_links or note in back_links:
+                    add_note(self.root, note)
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if not data:
+            return
+        if data.get("type") == "note":
+            self.post_message(self.NoteSelected(data["value"]))
+        elif data.get("type") == "tag":
+            self.post_message(self.TagSelected(data["value"]))
+
+
 class TagSearchModal(ModalScreen):
     """Модальное окно поиска по тегам."""
 
@@ -992,6 +1122,18 @@ class MarkdownEditorApp(App):
         padding: 1 2;
     }
 
+    #graph-view {
+        display: none;
+        height: 1fr;
+        padding: 0;
+        background: $background;
+    }
+
+    #graph-view Tree {
+        padding: 0 1;
+        height: 1fr;
+    }
+
     #form-fields {
         height: auto;
     }
@@ -1127,18 +1269,24 @@ class MarkdownEditorApp(App):
         self.sidebar_visible = True
         self.tag_cache: Dict[str, List[Path]] = {}
         self.tag_colors: Dict[str, str] = {}
+        self.note_links: Dict[Path, Set[Path]] = {}
         self._original_content: str = ""
         self._last_editor_selection = None
         self._file_history: List[Path] = []
+        self._return_to_graph: bool = False
         self.tag_index = TagIndex(self.file_system.root_path)
         self.query_engine = QueryEngine(self.file_system, self.parser, self.tag_index)
         self._rebuild_tag_cache()
 
     def _rebuild_tag_cache(self):
-        """Обновить SQLite-индекс и перезагрузить кэш тегов и цветов."""
-        self.tag_index.rebuild(self.file_system.get_md_files(), self.parser)
+        """Обновить SQLite-индекс и перезагрузить кэш тегов, цветов и связей."""
+        md_files = self.file_system.get_md_files()
+        # Связи перестраиваем ДО тегов, чтобы использовать старые mtime
+        self.tag_index.rebuild_note_links(md_files, self.parser)
+        self.tag_index.rebuild(md_files, self.parser)
         self.tag_cache = self.tag_index.get_tag_files()
         self.tag_colors = self.tag_index.get_tag_colors()
+        self.note_links = self.tag_index.get_note_links()
 
     def _refresh_file_tree(self) -> None:
         """Перестроить дерево файлов с учётом избранного."""
@@ -1186,6 +1334,7 @@ class MarkdownEditorApp(App):
                     yield EditorToolbar(id="editor-toolbar")
                     yield TextArea(id="editor", language="markdown")
                 yield FormView(id="form-view")
+                yield LinkGraphTree(id="graph-view")
 
         yield Static("", id="status-bar")
         yield Footer()
@@ -1200,6 +1349,7 @@ class MarkdownEditorApp(App):
         editor = self.query_one("#editor", TextArea)
         self.query_one("#editor-container").display = False
         self.query_one("#form-view", FormView).display = False
+        self.query_one("#graph-view", LinkGraphTree).display = False
         self._register_markdown_highlights(editor)
         self._apply_editor_syntax_theme(editor)
         self._update_status()
@@ -1211,8 +1361,13 @@ class MarkdownEditorApp(App):
         else:
             editor.theme = self.config.display.get("syntax_theme", "monokai")
 
+    def watch_theme(self, theme: str) -> None:
+        """Сохранить выбранную тему в конфиг при любом изменении."""
+        if getattr(self, "config", None):
+            self.config.save_theme(theme)
+
     def action_toggle_theme(self) -> None:
-        """Переключить светлую / тёмную тему и сохранить выбор."""
+        """Переключить светлую / тёмную тему."""
         if self.theme in _LIGHT_THEMES:
             new_theme = self.config.display.get("app_theme", "textual-dark")
             if new_theme in _LIGHT_THEMES:
@@ -1220,7 +1375,6 @@ class MarkdownEditorApp(App):
         else:
             new_theme = "textual-light"
         self.theme = new_theme
-        self.config.save_theme(new_theme)
         editor = self.query_one("#editor", TextArea)
         self._apply_editor_syntax_theme(editor)
         # Перерисовать открытый файл с новой темой кода
@@ -1276,8 +1430,14 @@ class MarkdownEditorApp(App):
         self._load_file()
 
     def action_go_back(self) -> None:
-        """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра)."""
+        """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра).
+
+        Если последний переход был из дерева связей — вернуться в граф."""
         if self.is_edit_mode:
+            return
+        if self._return_to_graph:
+            self._return_to_graph = False
+            self.show_graph()
             return
         if not self._file_history:
             return
@@ -1287,7 +1447,45 @@ class MarkdownEditorApp(App):
 
     def on_file_tree_file_selected(self, event: FileTree.FileSelected):
         """Обработать выбор файла."""
+        self._return_to_graph = False
         self._navigate_to(event.path)
+
+    def on_file_tree_graph_selected(self, _: FileTree.GraphSelected) -> None:
+        """Показать дерево связей."""
+        self.show_graph()
+
+    def show_graph(self) -> None:
+        """Показать дерево связей и скрыть остальные панели."""
+        viewer = self.query_one("#viewer", MarkdownViewer)
+        editor_container = self.query_one("#editor-container")
+        form = self.query_one("#form-view", FormView)
+        graph = self.query_one("#graph-view", LinkGraphTree)
+
+        viewer.display = False
+        editor_container.display = False
+        form.display = False
+        graph.display = True
+        graph.build_graph(
+            self.tag_cache,
+            self.tag_colors,
+            self.note_links,
+            self.file_system.get_md_files(),
+        )
+        graph.focus()
+        self.title = "Impactite — " + _("Link graph")
+        self._update_status()
+
+    def on_link_graph_tree_note_selected(self, event: LinkGraphTree.NoteSelected) -> None:
+        """Открыть заметку из дерева связей."""
+        if event.path.exists() and event.path.is_file():
+            self._return_to_graph = True
+            self._navigate_to(event.path)
+        else:
+            self.notify(_("File not found: {path}", path=str(event.path)), severity="error")
+
+    def on_link_graph_tree_tag_selected(self, event: LinkGraphTree.TagSelected) -> None:
+        """Открыть поиск по тегу из дерева связей."""
+        self.push_screen(TagSearchModal(self.tag_cache, initial_query=event.tag, tag_colors=self.tag_colors))
 
     def _load_file(self):
         """Загрузить текущий файл."""
@@ -1299,7 +1497,9 @@ class MarkdownEditorApp(App):
         editor = self.query_one("#editor", TextArea)
         editor_container = self.query_one("#editor-container")
         form   = self.query_one("#form-view", FormView)
+        graph  = self.query_one("#graph-view", LinkGraphTree)
 
+        graph.display = False
         if self.is_edit_mode:
             viewer.display = False
             editor_container.display = True
@@ -1407,6 +1607,7 @@ class MarkdownEditorApp(App):
         if not target.is_absolute():
             target = (self.current_file.parent / target).resolve()
         if target.exists() and target.is_file():
+            self._return_to_graph = False
             self._navigate_to(target)
         else:
             self.notify(_("File not found: {path}", path=str(target)), severity="error")
@@ -1681,6 +1882,7 @@ class MarkdownEditorApp(App):
 
     def on_tag_search_modal_file_selected(self, event: TagSearchModal.FileSelected):
         """Обработать выбор файла из поиска."""
+        self._return_to_graph = False
         self._navigate_to(event.path)
 
     def on_unmount(self) -> None:

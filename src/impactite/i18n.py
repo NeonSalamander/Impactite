@@ -85,6 +85,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Added to favorites": "Добавлено в избранное",
         "Removed from favorites": "Удалено из избранного",
         "Favorite": "Избранное",
+        "Link graph": "Граф связей",
+        "No data for graph": "Нет данных для графа",
+        "File not found: {path}": "Файл не найден: {path}",
     },
     "de": {
         # Виджеты / просмотр
@@ -149,6 +152,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Added to favorites": "Zu Favoriten hinzugefügt",
         "Removed from favorites": "Aus Favoriten entfernt",
         "Favorite": "Favorit",
+        "Link graph": "Verknüpfungsgraph",
+        "No data for graph": "Keine Daten für Graph",
+        "File not found: {path}": "Datei nicht gefunden: {path}",
     },
 }
 
