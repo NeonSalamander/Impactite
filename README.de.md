@@ -13,7 +13,8 @@ Obsidian, geschrieben in Python mit den Bibliotheken **Rich** und **Textual**.
 - ✏️ **Bearbeitungsmodus** — Markdown-Syntaxhervorhebung und Code-Hervorhebung in Codeblöcken, mit einer Formatierungs-Symbolleiste
 - 🏷️ **Tag-Wolke** — alle Tags mit individuellen Farben, anklickbar
 - 🔍 **Tag-Suche** — modales Fenster mit anklickbaren Ergebnissen
-- 🎨 **Helles/dunkles Thema** — Umschalten im laufenden Betrieb, die Auswahl wird gemerkt
+- 🕸️ **Verknüpfungsgraph** — hierarchischer Baum der Beziehungen zwischen Notizen und Tags; alle Knoten anklickbar (Notizen öffnen, Tags suchen)
+- 🎨 **Helles/dunkles Thema** — Umschalten im laufenden Betrieb oder über die Befehlspalette; die Auswahl wird automatisch gespeichert
 - 🌐 **Oberflächenlokalisierung** — Englisch, Russisch, Deutsch
 - 📝 **Eingabeformulare** — Formularnotizen mit Feldern, gespeichert in eine Datei oder eine Datenbank
 - 🧮 **Pseudo-SQL-Abfragen** — einbettbare Abfragen über Notizen und die Datenbank (im Dataview-Stil)
@@ -117,7 +118,7 @@ impactite/
 │   ├── i18n.py             # Lokalisierung (en/ru/de)
 │   └── editor.tcss         # (ungenutzt — aus Kompatibilitätsgründen behalten)
 └── notes/                  # Notizordner (Standard)
-    └── .tag_index.db       # SQLite: Tag-Index, Farben, Formulardatensätze, Favoriten
+    └── .tag_index.db       # SQLite: Tag-Index, Farben, Formulardatensätze, Favoriten, Notiz-Verknüpfungen
 ```
 
 ---
@@ -186,8 +187,9 @@ tags:
 Dunkel: `textual-dark`, `dracula`, `monokai`, `nord`, `gruvbox`, `tokyo-night`, …
 Hell: `textual-light`, `solarized-light`, `catppuccin-latte`, `rose-pine-dawn`, `atom-one-light`.
 
-`Ctrl+L` schaltet das helle/dunkle Thema direkt in der App um, und die Auswahl
-wird in `config.yaml` zurückgeschrieben (Feld `app_theme`).
+`Ctrl+L` schaltet das helle/dunkle Thema um, und die Auswahl wird automatisch
+in `config.yaml` gespeichert (Feld `app_theme`) — unabhängig davon, ob Sie das
+Thema über die Tastenkombination oder die Befehlspalette wechseln.
 
 ---
 
@@ -212,6 +214,23 @@ Beim Start werden alle Notizen gescannt und der Tag-Index in der SQLite-Datenban
 `.tag_index.db` im Notizordner gespeichert. Jedem Tag wird deterministisch eine
 eindeutige Farbe zugewiesen (in der DB gespeichert). Die Tag-Wolke unten links und
 die Tags direkt im Text sind anklickbar — ein Klick öffnet die Suche nach diesem Tag.
+
+---
+
+## Verknüpfungsgraph
+
+Der **🕸️ Verknüpfungsgraph** ist ein vordefinierter Knoten in der Seitenleiste
+(neben ⭐ Favoriten). Er öffnet einen hierarchischen Baum, der die Beziehungen
+zwischen Ihren Notizen und Tags visualisiert:
+
+- **Tags** sind die obersten Äste (farbig, anklickbar → öffnet die Tag-Suche)
+- **Notizen** sind unter den Tags verschachtelt, die sie enthalten (anklickbar → öffnet die Notiz)
+- **Interne Links** zwischen Notizen (`[Text](andere.md)`) werden verfolgt und als
+  verschachtelte Verbindungen angezeigt
+- **Rückverweise** (Notizen, die auf die aktuelle verlinken) werden ebenfalls angezeigt
+- Alle Knoten sind **standardmäßig ausgeklappt**, sodass die gesamte Struktur auf einen Blick sichtbar ist
+
+Wenn Sie eine Notiz aus dem Graphen öffnen, drücken Sie `Backspace`, um zum Graphen zurückzukehren.
 
 ---
 
@@ -493,6 +512,7 @@ ORDER BY amount DESC
 | `Ctrl+R` | Dateiliste aktualisieren |
 | `Ctrl+B` | Seitenleiste ein-/ausblenden |
 | `Ctrl+Q` | Beenden |
+| `Backspace` | Zurück zur vorherigen Notiz (oder zurück zum Verknüpfungsgraph) |
 | `Escape` | Suche/Dialog schließen; Editor verlassen (mit Speicheraufforderung) |
 
 Im Ansichtsmodus ist Scrollen verfügbar: Pfeile `↑`/`↓`, `PgUp`/`PgDown`,
