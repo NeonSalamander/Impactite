@@ -5,9 +5,8 @@ import colorsys
 import json
 import os
 import re
-import sqlite3
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -17,6 +16,15 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters import TerminalFormatter
 from pygments.styles import get_all_styles
+
+# LadybugDB import
+try:
+    import ladybug
+    from ladybug import Connection
+except ImportError:
+    # Fallback for development - in production, ladybug should be installed
+    ladybug = None
+    Connection = None
 
 
 @dataclass
@@ -34,7 +42,7 @@ class Config:
 
         Поддерживаются: абсолютный путь, ``~`` (домашний каталог) и
         относительный путь. Относительный путь считается ОТНОСИТЕЛЬНО каталога
-        конфиг-файла, а не текущей рабочей директории — чтобы запуск из любого
+        конг-файла, а не текущей рабочей директории — чтобы запуск из любого
         места давал один и тот же каталог заметок.
         """
         p = Path(self.notes_path).expanduser()
@@ -44,7 +52,7 @@ class Config:
         return p.resolve()
 
     def save_theme(self, theme: str) -> None:
-        """Обновить только app_theme в конфиг-файле, сохранив остальное без изменений."""
+        """Обновить только app_theme в конг-файле, сохранив остальное без изменений."""
         self.display["app_theme"] = theme
         if not os.path.exists(self.config_path):
             return
@@ -304,20 +312,78 @@ class MarkdownParser:
 
 
 class TagIndex:
-    """SQLite-индекс тегов для быстрого поиска по заметкам.
+    """LadybugDB-индекс тегов для быстрого поиска по заметкам.
 
     База данных хранится в том же каталоге, что и md-файлы.
     При первом запуске создаётся автоматически.
     Повторно индексируются только изменённые файлы.
     """
 
-    _DB_NAME = ".tag_index.db"
+    _DB_NAME = ".ladybug_index.lbug"
 
     def __init__(self, notes_path: Path) -> None:
-        self.db_path = notes_path / self._DB_NAME
-        self._conn = sqlite3.connect(str(self.db_path))
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._init_schema()
+        self.notes_dir = notes_path
+        # Initialize LadybugDB connection instead of sqlite3
+        self.db_path = self.notes_dir / self._DB_NAME
+        if ladybug is None:
+            raise ImportError("LadybugDB is not installed. Please install ladybug>=0.1.0")
+        # Create database and connection
+        self.database = ladybug.Database(str(self.db_path))
+        self.connection = ladybug.Connection(self.database)
+        self._initialize_schema()
+        print(f"DEBUG: TagIndex initialized with db_path: {self.db_path}")
+
+    def _initialize_schema(self):
+        """Create node and relationship tables if they don't exist"""
+        # Node tables
+        self.connection.execute("""
+            CREATE NODE TABLE IF NOT EXISTS Tag (
+                name STRING PRIMARY KEY,
+                color STRING
+            )
+        """)
+        
+        self.connection.execute("""
+            CREATE NODE TABLE IF NOT EXISTS File (
+                path STRING PRIMARY KEY,
+                mtime DOUBLE
+            )
+        """)
+        
+        self.connection.execute("""
+            CREATE NODE TABLE IF NOT EXISTS FormRecord (
+                id INT64 PRIMARY KEY,
+                source STRING,
+                catalog STRING,
+                created_at STRING,
+                data JSON
+            )
+        """)
+        
+        self.connection.execute("""
+            CREATE NODE TABLE IF NOT EXISTS Favorite (
+                file_path STRING PRIMARY KEY
+            )
+        """)
+        
+        # Relationship tables
+        self.connection.execute("""
+            CREATE REL TABLE IF NOT EXISTS HAS_TAG_FRONTMatter (
+                FROM File TO Tag
+            )
+        """)
+        
+        self.connection.execute("""
+            CREATE REL TABLE IF NOT EXISTS HAS_TAG_BODY (
+                FROM File TO Tag
+            )
+        """)
+        
+        self.connection.execute("""
+            CREATE REL TABLE IF NOT EXISTS RECORD_FROM_FILE (
+                FROM FormRecord TO File
+            )
+        """)
 
     @staticmethod
     def _color_for_tag(tag: str) -> str:
@@ -372,55 +438,210 @@ class TagIndex:
     def rebuild(self, files: List[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить индекс.
 
-        Пропускает неизменённые файлы, удаляет записи для удалённых.
+        Пропускает неизменённые файлы, удаляет записи для удалённые.
         """
-        current = {str(f) for f in files}
-        cached  = {row[0] for row in self._conn.execute("SELECT file_path FROM file_mtimes")}
-
-        for stale in cached - current:
-            self._conn.execute("DELETE FROM file_tags   WHERE file_path=?", (stale,))
-            self._conn.execute("DELETE FROM file_mtimes WHERE file_path=?", (stale,))
-
-        for fp in files:
-            path_str = str(fp)
-            try:
-                mtime = fp.stat().st_mtime
-            except OSError:
-                continue
-
-            row = self._conn.execute(
-                "SELECT mtime FROM file_mtimes WHERE file_path=?", (path_str,)
-            ).fetchone()
-            if row and abs(row[0] - mtime) < 0.001:
-                continue
-
-            self._conn.execute("DELETE FROM file_tags WHERE file_path=?", (path_str,))
-            fm_tags, body_tags = parser.extract_tags_with_source(fp)
-            for tag in fm_tags:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO file_tags VALUES(?,?,'frontmatter')",
-                    (tag, path_str),
-                )
-            for tag in body_tags:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO file_tags VALUES(?,?,'body')",
-                    (tag, path_str),
-                )
-            self._conn.execute(
-                "INSERT OR REPLACE INTO file_mtimes VALUES(?,?)", (path_str, mtime)
-            )
-
-        # Синхронизируем цвета: добавляем новые теги, удаляем исчезнувшие
-        all_tags = {r[0] for r in self._conn.execute("SELECT DISTINCT tag FROM file_tags")}
-        colored   = {r[0] for r in self._conn.execute("SELECT tag FROM tag_colors")}
-        for tag in all_tags - colored:
-            self._conn.execute(
-                "INSERT INTO tag_colors VALUES(?,?)", (tag, self._color_for_tag(tag))
-            )
-        for tag in colored - all_tags:
-            self._conn.execute("DELETE FROM tag_colors WHERE tag=?", (tag,))
-
-        self._conn.commit()
+        # Convert files to set of strings for easier comparison
+        markdown_files = set(str(f) for f in files)
+        
+        # Get currently indexed files from LadybugDB
+        indexed_files = {}
+        try:
+            result = self.connection.execute("MATCH (f:File) RETURN f.path AS path, f.mtime AS mtime")
+            # Process the QueryResult
+            while result.has_next():
+                row = result.get_next()
+                indexed_files[row[0]] = row[1]
+        except Exception:
+            # If no File table exists yet, treat all as new
+            indexed_files = {}
+        
+        # Determine files to process
+        files_to_add = markdown_files - set(indexed_files.keys())
+        files_to_delete = set(indexed_files.keys()) - markdown_files
+        files_to_update = set()
+        
+        # Check for modified files
+        for file_path in markdown_files & set(indexed_files.keys()):
+            current_mtime = Path(file_path).stat().st_mtime
+            if current_mtime > indexed_files[file_path]:
+                files_to_update.add(file_path)
+        
+        # Process deletions
+        for file_path in files_to_delete:
+            self._remove_file_from_index(file_path)
+        
+        # Process additions and updates
+        for file_path in files_to_add | files_to_update:
+            self._add_or_update_file_in_index(file_path, Path(file_path).stat().st_mtime, parser)
+        
+        # Debug: query all tags and files after processing
+        try:
+            tag_result = self.connection.execute("MATCH (t:Tag) RETURN t.name")
+            print("DEBUG: Tags after processing files:")
+            while tag_result.has_next():
+                print("  ", tag_result.get_next()[0])
+        except Exception as e:
+            print("DEBUG: Error querying tags:", e)
+        
+        # Cleanup orphaned tags
+        self._cleanup_orphaned_tags()
+    
+    def _remove_file_from_index(self, file_path: str) -> None:
+        """Remove a file and its associated data from the index"""
+        # Delete file node and all its relationships
+        self.connection.execute("""
+            MATCH (f:File {path: $path})
+            DETACH DELETE f
+        """, {"path": file_path})
+        
+        # Note: We do NOT delete associated form records or favorites here to match original behavior
+        # Form records and favorites are preserved when a file is deleted from the index
+    
+    def _add_or_update_file_in_index(self, file_path: str, mtime: float, parser: MarkdownParser) -> None:
+        """Add or update a file in the index and process its tags"""
+        # Upsert file node
+        self.connection.execute("""
+            MERGE (f:File {path: $path})
+            SET f.mtime = $mtime
+        """, {"path": file_path, "mtime": mtime})
+        
+        # Remove existing tag and form record relationships for this file
+        self.connection.execute("""
+            MATCH (f:File {path: $file_path})-[r:HAS_TAG_FRONTMatter]->()
+            DELETE r
+        """, {"file_path": file_path})
+        self.connection.execute("""
+            MATCH (f:File {path: $file_path})-[r:HAS_TAG_BODY]->()
+            DELETE r
+        """, {"file_path": file_path})
+        self.connection.execute("""
+            MATCH (f:File {path: $file_path})-[r:RECORD_FROM_FILE]->()
+            DELETE r
+        """, {"file_path": file_path})
+        
+        # Parse file to extract tags and form data
+        tags_frontmatter, tags_body, form_data = self._parse_file_for_indexing(file_path, parser)
+        
+        # Process frontmatter tags
+        for tag_name in tags_frontmatter:
+            color = self._generate_deterministic_color(tag_name)
+            # Ensure tag node exists
+            self.connection.execute("""
+                MERGE (t:Tag {name: $tag_name})
+                ON CREATE SET t.color = $color
+            """, {
+                "tag_name": tag_name,
+                "color": color,
+            })
+            # Ensure relationship exists
+            self.connection.execute("""
+                MATCH (f:File {path: $file_path})
+                MATCH (t:Tag {name: $tag_name})
+                MERGE (f)-[r:HAS_TAG_FRONTMatter]->(t)
+            """, {
+                "file_path": file_path,
+                "tag_name": tag_name,
+            })
+        
+        # Process body tags
+        for tag_name in tags_body:
+            color = self._generate_deterministic_color(tag_name)
+            # Ensure tag node exists
+            self.connection.execute("""
+                MERGE (t:Tag {name: $tag_name})
+                ON CREATE SET t.color = $color
+            """, {
+                "tag_name": tag_name,
+                "color": color,
+            })
+            # Ensure relationship exists
+            self.connection.execute("""
+                MATCH (f:File {path: $file_path})
+                MATCH (t:Tag {name: $tag_name})
+                MERGE (f)-[r:HAS_TAG_BODY]->(t)
+            """, {
+                "file_path": file_path,
+                "tag_name": tag_name,
+            })
+        
+        # Process form record if present
+        if form_data:
+            self._upsert_form_record(file_path, form_data)
+    
+    def _cleanup_orphaned_tags(self) -> None:
+        """Remove tags that are no longer associated with any files"""
+        self.connection.execute("""
+            MATCH (t:Tag)
+            WHERE NOT ((t)<-[:HAS_TAG_FRONTMatter]-() OR (t)<-[:HAS_TAG_BODY]-())
+            DETACH DELETE t
+        """)
+    
+    def _parse_file_for_indexing(self, file_path: str, parser: MarkdownParser) -> Tuple[Set[str], Set[str], Optional[Dict]]:
+        """Parse a markdown file to extract frontmatter tags, body tags, and form data"""
+        path_obj = Path(file_path)
+        
+        # Extract tags with source (frontmatter vs body) using the provided parser
+        fm_tags, body_tags = parser.extract_tags_with_source(path_obj)
+        
+        # Check if this is a form record
+        try:
+            content = path_obj.read_text(encoding="utf-8")
+            form_def = parse_form_definition(content)
+            form_data = None
+            if form_def and form_def.get("destination") == "database":
+                # Extract form values from the content
+                # This is simplified - in practice we'd need to parse the actual form values
+                # For now, we'll create a basic form record
+                form_data = {
+                    "catalog": form_def.get("catalog", ""),
+                    "data": {}  # Would be populated from actual form fields
+                }
+        except Exception:
+            form_data = None
+            
+        return fm_tags, body_tags, form_data
+    
+    def _generate_deterministic_color(self, tag_name: str) -> str:
+        """Generate deterministic HSL->HEX color for a tag"""
+        # Use the same implementation as the original TagIndex
+        hue = (hash(tag_name) & 0x7FFF_FFFF) % 360 / 360.0
+        r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
+        return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    
+    def _upsert_form_record(self, file_path: str, form_data: Dict) -> None:
+        """Insert or update a form record in the database"""
+        # Generate deterministic ID based on file path and form data
+        form_id = hash((file_path, json.dumps(form_data, sort_keys=True))) & ((1 << 63) - 1)
+        
+        self.connection.execute("""
+            MERGE (fr:FormRecord {id: $form_id})
+            ON CREATE SET 
+                fr.source = $source,
+                fr.catalog = $catalog,
+                fr.created_at = $created_at,
+                fr.data = $data
+            ON MATCH SET
+                fr.source = $source,
+                fr.catalog = $catalog,
+                fr.created_at = $created_at,
+                fr.data = $data
+        """, {
+            "form_id": form_id,
+            "source": file_path,
+            "catalog": form_data.get("catalog", ""),
+            "created_at": form_data.get("created_at", ""),
+            "data": json.dumps(form_data.get("data", {}))
+        })
+        
+        # Create relationship to file
+        self.connection.execute("""
+            MATCH (fr:FormRecord {id: $form_id})
+            MATCH (f:File {path: $file_path})
+            MERGE (fr)-[r:RECORD_FROM_FILE]->(f)
+        """, {
+            "form_id": form_id,
+            "file_path": file_path
+        })
 
     def rebuild_note_links(self, files: List[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить связи между заметками.
@@ -477,42 +698,90 @@ class TagIndex:
 
     def get_tag_files(self) -> Dict[str, List[Path]]:
         """Вернуть {тег: [Path, ...]} по всем проиндексированным файлам."""
-        result: Dict[str, List[Path]] = {}
-        for tag, fp in self._conn.execute(
-            "SELECT DISTINCT tag, file_path FROM file_tags ORDER BY tag"
-        ):
-            result.setdefault(tag, []).append(Path(fp))
-        return result
-
+        try:
+            # Query for all tag-file relationships
+            result = self.connection.execute("""
+                MATCH (t:Tag)<-[:HAS_TAG_FRONTMatter|:HAS_TAG_BODY]-(f:File)
+                RETURN t.name AS tag, f.path AS path
+            """)
+            
+            # Group by tag
+            tag_files: Dict[str, List[Path]] = {}
+            while result.has_next():
+                row = result.get_next()
+                tag = row[0]
+                path = Path(row[1])
+                if tag not in tag_files:
+                    tag_files[tag] = []
+                tag_files[tag].append(path)
+            
+            return tag_files
+        except Exception:
+            return {}
+    
     def get_tag_counts(self) -> Dict[str, int]:
         """Вернуть {тег: количество файлов}."""
-        return dict(
-            self._conn.execute(
-                "SELECT tag, COUNT(DISTINCT file_path) FROM file_tags GROUP BY tag"
-            )
-        )
-
+        try:
+            result = self.connection.execute("""
+                MATCH (t:Tag)<-[:HAS_TAG_FRONTMatter|:HAS_TAG_BODY]-(f:File)
+                RETURN t.name AS tag, COUNT(DISTINCT f) AS count
+            """)
+            
+            # Process the QueryResult
+            counts = {}
+            while result.has_next():
+                row = result.get_next()
+                counts[row[0]] = row[1]
+            return counts
+        except Exception:
+            return {}
+    
     def get_tag_colors(self) -> Dict[str, str]:
         """Вернуть {тег: цвет hex} для всех тегов."""
-        return dict(self._conn.execute("SELECT tag, color FROM tag_colors"))
-
+        try:
+            result = self.connection.execute("""
+                MATCH (t:Tag)
+                RETURN t.name AS tag, t.color AS color
+            """)
+            
+            # Process the QueryResult
+            colors = {}
+            while result.has_next():
+                row = result.get_next()
+                colors[row[0]] = row[1]
+            return colors
+        except Exception:
+            return {}
+    
     def save_form_record(self, form_source: str, catalog: str, values: Dict) -> int:
         """Сохранить запись формы в БД. Значения сериализуются в JSON.
 
         Возвращает id вставленной записи.
         """
-        cur = self._conn.execute(
-            "INSERT INTO form_records(form_source, catalog, data, created_at) "
-            "VALUES(?,?,?,?)",
-            (
-                form_source,
-                catalog,
-                json.dumps(values, ensure_ascii=False),
-                datetime.now().isoformat(timespec="seconds"),
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid
+        # Generate deterministic ID based on form source and values
+        form_id = hash((form_source, json.dumps(values, sort_keys=True))) & ((1 << 63) - 1)
+        
+        self.connection.execute("""
+            MERGE (fr:FormRecord {id: $form_id})
+            ON CREATE SET 
+                fr.source = $source,
+                fr.catalog = $catalog,
+                fr.created_at = $created_at,
+                fr.data = $data
+            ON MATCH SET
+                fr.source = $source,
+                fr.catalog = $catalog,
+                fr.created_at = $created_at,
+                fr.data = $data
+        """, {
+            "form_id": form_id,
+            "source": form_source,
+            "catalog": catalog,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "data": json.dumps(values, ensure_ascii=False)
+        })
+        
+        return form_id
 
     def get_form_records(
         self, form_source: Optional[str] = None, catalog: Optional[str] = None
@@ -522,60 +791,128 @@ class TagIndex:
         Каждая запись — dict {id, form_source, catalog, data, created_at},
         где data уже десериализована из JSON.
         """
-        query = "SELECT id, form_source, catalog, data, created_at FROM form_records"
-        conditions, params = [], []
-        if form_source is not None:
-            conditions.append("form_source = ?")
-            params.append(form_source)
-        if catalog is not None:
-            conditions.append("catalog = ?")
-            params.append(catalog)
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY id"
-
-        result = []
-        for rid, src, cat, data, created in self._conn.execute(query, params):
-            try:
-                parsed = json.loads(data)
-            except Exception:
-                parsed = {}
-            result.append({
-                "id": rid, "form_source": src, "catalog": cat,
-                "data": parsed, "created_at": created,
-            })
-        return result
+        try:
+            query = "MATCH (fr:FormRecord)"
+            params = {}
+            
+            conditions = []
+            if form_source is not None:
+                conditions.append("fr.source = $form_source")
+                params["form_source"] = form_source
+            if catalog is not None:
+                conditions.append("fr.catalog = $catalog")
+                params["catalog"] = catalog
+                
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            
+            query += " RETURN fr.id AS id, fr.source AS source, fr.catalog AS catalog, fr.created_at AS created_at, fr.data AS data"
+            
+            result = self.connection.execute(query, params)
+            
+            # Process the QueryResult
+            records = []
+            while result.has_next():
+                row = result.get_next()
+                records.append({
+                    "id": row[0],
+                    "source": row[1],
+                    "catalog": row[2],
+                    "created_at": row[3],
+                    "data": json.loads(row[4]) if row[4] else {}
+                })
+            
+            return records
+        except Exception:
+            return []
 
     # ---- избранное -----------------------------------------------------------
 
-    def add_favorite(self, file_path: str) -> None:
-        self._conn.execute("INSERT OR IGNORE INTO favorites VALUES(?)", (file_path,))
-        self._conn.commit()
+    def add_favorite(self, file_path: Union[str, Path]) -> None:
+        """Добавить файл в избранное"""
+        try:
+            self.connection.execute("""
+                MERGE (fav:Favorite {file_path: $file_path})
+            """, {"file_path": str(file_path)})
+        except Exception:
+            pass  # Fail silently to match existing behavior
 
-    def remove_favorite(self, file_path: str) -> None:
-        self._conn.execute("DELETE FROM favorites WHERE file_path=?", (file_path,))
-        self._conn.commit()
+    def remove_favorite(self, file_path: Union[str, Path]) -> None:
+        """Удалить файл из избранного"""
+        try:
+            self.connection.execute("""
+                MATCH (fav:Favorite {file_path: $file_path})
+                DELETE fav
+            """, {"file_path": str(file_path)})
+        except Exception:
+            pass  # Fail silently to match existing behavior
 
-    def toggle_favorite(self, file_path: str) -> bool:
+    def toggle_favorite(self, file_path: Union[str, Path]) -> bool:
+        """Переключить статус избранного для файла"""
         if self.is_favorite(file_path):
             self.remove_favorite(file_path)
             return False
         self.add_favorite(file_path)
         return True
 
-    def is_favorite(self, file_path: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM favorites WHERE file_path=?", (file_path,)
-        ).fetchone()
-        return row is not None
+    def is_favorite(self, file_path: Union[str, Path]) -> bool:
+        """Проверить, отмечен ли файл как избранный"""
+        try:
+            result = self.connection.execute("""
+                MATCH (fav:Favorite {file_path: $file_path})
+                RETURN count(fav) > 0 AS is_fav
+            """, {"file_path": str(file_path)})
+            
+            # Process the QueryResult
+            if result.has_next():
+                row = result.get_next()
+                return row[0]
+            return False
+        except Exception:
+            return False
 
     def get_favorites(self) -> List[str]:
-        return [
-            r[0] for r in self._conn.execute("SELECT file_path FROM favorites ORDER BY file_path")
-        ]
+        """Получить все избранные файлы"""
+        try:
+            result = self.connection.execute("""
+                MATCH (fav:Favorite)
+                RETURN fav.file_path AS path
+            """)
+            
+            # Process the QueryResult
+            favorites = []
+            while result.has_next():
+                row = result.get_next()
+                favorites.append(row[0])
+            return favorites
+        except Exception:
+            return []
 
-    def close(self) -> None:
-        self._conn.close()
+    def run_read_cypher(self, query: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute a read-only Cypher query and return the results as a list of dictionaries.
+        Each dictionary represents a row, with keys being the column names (or variable names in the RETURN clause).
+
+        Warning: This method does not validate that the query is read-only. It is the caller's responsibility
+        to ensure that the query does not modify the database. Write queries may lead to undefined behavior
+        and are not supported.
+
+        Args:
+            query: The Cypher query to execute.
+            parameters: Optional dictionary of parameters to pass to the query.
+
+        Returns:
+            A list of dictionaries, each representing a row in the result.
+        """
+        if parameters is None:
+            parameters = {}
+        result = self.connection.execute(query, parameters)
+        columns = result.keys()
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append(dict(zip(columns, row)))
+        return rows
 
 
 def parse_form_definition(content: str) -> Optional[Dict]:

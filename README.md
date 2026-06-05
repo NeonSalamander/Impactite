@@ -208,8 +208,8 @@ Tags are detected in two ways (in priority order):
    This note is about #python and #textual.
    ```
 
-On startup all notes are scanned and the tag index is stored in the SQLite
-database `.tag_index.db` inside the notes folder. Each tag is deterministically
+On startup all notes are scanned and the tag index is stored in the LadybugDB
+database `.ladybug_index.lbug` inside the notes folder. Each tag is deterministically
 assigned a unique color (saved in the DB). The tag cloud in the bottom-left and
 the tags within the text are clickable — a click opens search for that tag.
 
@@ -253,7 +253,7 @@ fields:
 
 - **`type: form`** — the form marker (must be first).
 - **`destination`** — `note` (default) saves the result as a separate md file with
-  frontmatter; `database` saves a record into SQLite (the same DB as the tag
+  frontmatter; `database` saves a record into LadybugDB (the same DB as the tag
   index, the `form_records` table).
 - **`catalog`** — for `note` this is a subfolder inside the notes directory where
   the created file is placed; for `database` it's a text catalog label of the record.

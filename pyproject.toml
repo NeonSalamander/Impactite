@@ -10,6 +10,7 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0.0",
     "textual[syntax]>=0.47.0",
+    "ladybug>=0.1.0",
 ]
 
 [dependency-groups]
