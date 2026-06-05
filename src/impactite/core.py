@@ -787,6 +787,32 @@ class TagIndex:
         except Exception:
             return []
 
+    def run_read_cypher(self, query: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute a read-only Cypher query and return the results as a list of dictionaries.
+        Each dictionary represents a row, with keys being the column names (or variable names in the RETURN clause).
+
+        Warning: This method does not validate that the query is read-only. It is the caller's responsibility
+        to ensure that the query does not modify the database. Write queries may lead to undefined behavior
+        and are not supported.
+
+        Args:
+            query: The Cypher query to execute.
+            parameters: Optional dictionary of parameters to pass to the query.
+
+        Returns:
+            A list of dictionaries, each representing a row in the result.
+        """
+        if parameters is None:
+            parameters = {}
+        result = self.connection.execute(query, parameters)
+        columns = result.keys()
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append(dict(zip(columns, row)))
+        return rows
+
 
 def parse_form_definition(content: str) -> Optional[Dict]:
     """Проверить является ли заметка формой ввода.
