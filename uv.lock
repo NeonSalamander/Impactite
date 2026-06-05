@@ -7,6 +7,7 @@ name = "impactite"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ladybug" },
     { name = "markdown" },
     { name = "pygments" },
     { name = "pyyaml" },
@@ -16,6 +17,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ladybug", specifier = ">=0.1.0" },
     { name = "markdown", specifier = ">=3.5.0" },
     { name = "pygments", specifier = ">=2.17.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -25,6 +27,22 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = []
+
+[[package]]
+name = "ladybug"
+version = "0.17.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/f6/1511d2ab4391af8a4133c556ccaf79b613d79c6120e3fcced02c8d438982/ladybug-0.17.1.tar.gz", hash = "sha256:82efea498713c7da7f6f94f80252574599252d26ee10fb11e62ae932b5d8f2ba", size = 10160802, upload-time = "2026-06-02T20:08:43.241Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/e6/94dff21a9ef485fba3a933d76735197e8ced13184edd862361319ee2e253/ladybug-0.17.1-cp314-cp314-macosx_13_0_arm64.whl", hash = "sha256:c8a71f90f2fe16396c98380aadd5519ed72346aed4d7872b06e2450e9470ac77", size = 4186197, upload-time = "2026-06-02T20:08:25.443Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/7c/a9fd639408629e8a33d014d482355eab272edfe525aea1c7a5305d32662e/ladybug-0.17.1-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:08934e417214ca03836934ed7bd1f6ebedf6959db3b4405541aa4389f60800a6", size = 4668982, upload-time = "2026-06-02T20:08:27.451Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/aa/ccd37c07d38e7305212ddd8d05dbfadd61a07ad5e56aebaf92fe4c6c23cb/ladybug-0.17.1-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2dbca5d77c309b6c992f5ab9f5d18b2a8002d4766f09ab7fa6ff9510df304b74", size = 7066952, upload-time = "2026-06-02T20:08:29.43Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/a1/e9e987fdf72ec8c67bf57223295abba78489c7629bc126e851249cd4c24e/ladybug-0.17.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1f206b635840a26dd76e0b2f74e00e25e33fad1eb4e913bcce98cd5e5cf0146d", size = 7921609, upload-time = "2026-06-02T20:08:31.751Z" },
+    { url = "https://files.pythonhosted.org/packages/56/0b/8267a09d1589e9f19756c1118d406da88d9370fb04ede0285ae75b9b0d04/ladybug-0.17.1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:a4c6701f0abce984e7820f8242754682b7e6ed82787b1316b614c192458bac99", size = 7898765, upload-time = "2026-06-02T20:08:33.864Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/06/5214d7ed85e3a302a855af067475234d44d45dbf220f5773bd9f476c7ee8/ladybug-0.17.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:6c53cf98ae5b414af6f6f2025ccbb06dcd368eb1142e9a675ab24ccc4b936ed5", size = 8782260, upload-time = "2026-06-02T20:08:36.309Z" },
+    { url = "https://files.pythonhosted.org/packages/45/d7/5ad430ad61b7db1b409fd3086f32fb1b64300c9a2f1d455dd0ca7b39adf0/ladybug-0.17.1-cp314-cp314-win_amd64.whl", hash = "sha256:48efb95673096a7524a1f16943a1885ad016944ea8a5a000746d9939cf2a039b", size = 5455451, upload-time = "2026-06-02T20:08:39.118Z" },
+    { url = "https://files.pythonhosted.org/packages/af/da/75ca2ef8911bd554e997793c767f6e77892c8cb4761939f3abd225532ebc/ladybug-0.17.1-cp314-cp314-win_arm64.whl", hash = "sha256:2ad869f14b0307c7eb2f91639da7ab887c666c2f93260c46a055c7969e082a09", size = 5400801, upload-time = "2026-06-02T20:08:41.114Z" },
+]
 
 [[package]]
 name = "linkify-it-py"
