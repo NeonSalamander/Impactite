@@ -63,3 +63,4 @@ docs/_build/
 
 # SciPy / Pandas
 *.scipy
+.worktrees/
