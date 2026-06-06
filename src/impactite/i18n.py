@@ -31,6 +31,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Query error: {error}": "Ошибка запроса: {error}",
         "Query returned no data": "Запрос не вернул данных",
         "0 records": "0 записей",
+        # Базовые выборки (base)
+        "Filters": "Фильтры",
+        "contains...": "содержит...",
+        "min": "мин",
+        "max": "макс",
+        "from": "от",
+        "to": "до",
         # Формы
         "Save": "Сохранить",
         "Cancel": "Отмена",
@@ -85,6 +92,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Added to favorites": "Добавлено в избранное",
         "Removed from favorites": "Удалено из избранного",
         "Favorite": "Избранное",
+        "Link graph": "Граф связей",
+        "No data for graph": "Нет данных для графа",
+        "File not found: {path}": "Файл не найден: {path}",
     },
     "de": {
         # Виджеты / просмотр
@@ -95,6 +105,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Query error: {error}": "Abfragefehler: {error}",
         "Query returned no data": "Abfrage lieferte keine Daten",
         "0 records": "0 Datensätze",
+        # Базовые выборки (base)
+        "Filters": "Filter",
+        "contains...": "enthält...",
+        "min": "min",
+        "max": "max",
+        "from": "von",
+        "to": "bis",
         # Формы
         "Save": "Speichern",
         "Cancel": "Abbrechen",
@@ -149,6 +166,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Added to favorites": "Zu Favoriten hinzugefügt",
         "Removed from favorites": "Aus Favoriten entfernt",
         "Favorite": "Favorit",
+        "Link graph": "Verknüpfungsgraph",
+        "No data for graph": "Keine Daten für Graph",
+        "File not found: {path}": "Datei nicht gefunden: {path}",
     },
 }
 

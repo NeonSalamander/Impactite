@@ -13,9 +13,10 @@ from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -41,7 +42,7 @@ from textual.widgets._select import NoSelection
 
 from impactite.core import (
     Config, FileNode, FileSystem, MarkdownParser, QueryEngine, TagIndex,
-    parse_form_definition,
+    parse_form_definition, parse_base_definition,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
 
@@ -90,6 +91,11 @@ class FileTree(Tree):
             self.path = path
             super().__init__()
 
+    class GraphSelected(Message):
+        """Сообщение о выборе графа связей."""
+
+        pass
+
     def __init__(self, root_label: str, **kwargs):
         super().__init__(root_label, **kwargs)
         self.show_root = False
@@ -98,14 +104,20 @@ class FileTree(Tree):
         self.root_path: Optional[Path] = None
         # Текущий выбранный каталог (для создания заметок/папок)
         self.selected_dir: Optional[Path] = None
+        self.graph_node_id: Optional[int] = None
 
     def populate_tree(self, file_system: FileSystem, favorites: Optional[List[str]] = None):
         """Заполнить дерево файлами."""
         self.clear()
         self.file_nodes.clear()
         self.dir_nodes.clear()
+        self.graph_node_id = None
         self.root_path = file_system.root_path
         self.root.expand()
+
+        # Граф связей — предопределённый узел
+        graph_node = self.root.add(_("🕸️ Link graph"), expand=False)
+        self.graph_node_id = id(graph_node)
 
         if favorites:
             existing: List[Path] = []
@@ -141,7 +153,9 @@ class FileTree(Tree):
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """Обработать выбор узла."""
         node_id = id(event.node)
-        if node_id in self.file_nodes:
+        if node_id == self.graph_node_id:
+            self.post_message(self.GraphSelected())
+        elif node_id in self.file_nodes:
             # Каталог для создания — папка, в которой лежит выбранный файл
             self.selected_dir = self.file_nodes[node_id].parent
             self.post_message(self.FileSelected(self.file_nodes[node_id]))
@@ -691,6 +705,529 @@ class FormView(VerticalScroll):
             self.post_message(self.Cancelled())
 
 
+class BaseView(VerticalScroll):
+    """Отображает заметку типа 'base' как компактные фильтры + таблица результатов query."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._query: str = ""
+        self._filter_defs: list = []
+        self._columns: list = []
+        self._all_rows: list = []
+        self._apply_generation: int = 0
+        self._multi_select_values: dict[str, set] = {}
+        self._multi_select_modes: dict[str, str] = {}
+
+    def compose(self) -> ComposeResult:
+        yield Horizontal(id="base-filters")
+        yield RichLog(id="base-results", markup=True, highlight=False, wrap=False)
+
+    def load_base(self, query: str, filter_defs: list) -> None:
+        """Загрузить query и определения фильтров."""
+        self._query = query
+        self._filter_defs = filter_defs
+        self.run_worker(self._rebuild_filters(), exclusive=True)
+
+    async def _rebuild_filters(self) -> None:
+        """Пересобрать виджеты фильтров."""
+        container = self.query_one("#base-filters", Horizontal)
+        await container.remove_children()
+        self._multi_select_values.clear()
+        self._multi_select_modes.clear()
+        widgets = self._build_filter_widgets()
+        if widgets:
+            await container.mount(*widgets)
+        self._apply_filters()
+
+    def _build_filter_widgets(self) -> list:
+        """Построить компактные виджеты фильтров в ряд."""
+        widgets: list = []
+        app = self.app
+        known_tags = sorted(getattr(app, "tag_cache", {}).keys()) if app else []
+
+        for fd in self._filter_defs:
+            if not isinstance(fd, dict):
+                continue
+            for name, info in fd.items():
+                if not isinstance(info, list) or len(info) < 1:
+                    continue
+                ftype = str(info[0]).lower()
+                widget = self._make_filter_widget(name, ftype, info, known_tags)
+                reset_btn = Static(
+                    "x",
+                    id=f"base-filter-reset-{name}",
+                    classes="base-filter-reset",
+                )
+                mode_btn = Static(
+                    self._multi_select_modes.get(name, "OR"),
+                    id=f"base-filter-mode-{name}",
+                    classes="base-filter-mode",
+                )
+                if isinstance(widget, list):
+                    if any(isinstance(w, Static) for w in widget):
+                        non_static = [w for w in widget if not isinstance(w, Static)]
+                        static_widgets = [w for w in widget if isinstance(w, Static)]
+                        item = Vertical(
+                            Horizontal(
+                                Label(f"[bold]{name}:[/bold]", classes="base-filter-label"),
+                                *non_static,
+                                mode_btn,
+                                reset_btn,
+                                classes="base-filter-row",
+                            ),
+                            *static_widgets,
+                            classes="base-filter-item base-filter-multiselect-item",
+                        )
+                    else:
+                        item = Horizontal(
+                            Label(f"[bold]{name}:[/bold]", classes="base-filter-label"),
+                            *widget,
+                            reset_btn,
+                            classes="base-filter-item",
+                        )
+                else:
+                    item = Horizontal(
+                        Label(f"[bold]{name}:[/bold]", classes="base-filter-label"),
+                        widget,
+                        reset_btn,
+                        classes="base-filter-item",
+                    )
+                widgets.append(item)
+        return widgets
+
+    def _make_filter_widget(self, name: str, ftype: str, info: list, known_tags: list):
+        """Создать компактный виджет для одного фильтра."""
+        wid = f"base-filter-{name}"
+        if ftype == "string":
+            return Input(placeholder=_("contains..."), id=wid,
+                         classes="base-filter-widget base-filter-string")
+        if ftype == "multi-select":
+            options = info[1] if len(info) > 1 else []
+            opts: list = []
+            if options == "tags":
+                opts = known_tags
+            elif isinstance(options, list):
+                opts = [str(o) for o in options]
+            if opts:
+                return [
+                    Select(
+                        [(o, o) for o in opts],
+                        allow_blank=True,
+                        prompt=name,
+                        compact=True,
+                        id=wid, classes="base-filter-widget base-filter-select",
+                    ),
+                    Static("", id=f"{wid}-display", classes="base-filter-display"),
+                ]
+            return Input(placeholder=_("contains..."), id=wid,
+                         classes="base-filter-widget base-filter-string")
+        if ftype == "integer":
+            return [
+                Input(placeholder=_("min"), type="integer",
+                      id=f"{wid}-min", classes="base-filter-number"),
+                Input(placeholder=_("max"), type="integer",
+                      id=f"{wid}-max", classes="base-filter-number"),
+            ]
+        if ftype == "date":
+            return [
+                Input(placeholder=_("from"),
+                      id=f"{wid}-from", classes="base-filter-date"),
+                Input(placeholder=_("to"),
+                      id=f"{wid}-to", classes="base-filter-date"),
+            ]
+        # fallback
+        return Input(placeholder=_("contains..."), id=wid,
+                     classes="base-filter-widget base-filter-string")
+
+    def _collect_filter_values(self) -> dict:
+        """Собрать текущие значения фильтров."""
+        values: dict = {}
+        for fd in self._filter_defs:
+            if not isinstance(fd, dict):
+                continue
+            for name, info in fd.items():
+                if not isinstance(info, list) or len(info) < 1:
+                    continue
+                ftype = str(info[0]).lower()
+                try:
+                    if ftype == "string":
+                        v = self.query_one(f"#base-filter-{name}", Input).value.strip()
+                        values[name] = v if v else None
+                    elif ftype == "multi-select":
+                        selected = sorted(self._multi_select_values.get(name, []))
+                        values[name] = selected if selected else None
+                        values[f"__mode_{name}"] = self._multi_select_modes.get(name, "OR")
+                    elif ftype == "integer":
+                        min_val = None
+                        max_val = None
+                        min_raw = self.query_one(f"#base-filter-{name}-min", Input).value.strip()
+                        if min_raw:
+                            min_val = int(min_raw)
+                        max_raw = self.query_one(f"#base-filter-{name}-max", Input).value.strip()
+                        if max_raw:
+                            max_val = int(max_raw)
+                        values[name] = (min_val, max_val) if (min_val is not None or max_val is not None) else None
+                    elif ftype == "date":
+                        from_val = None
+                        to_val = None
+                        from_raw = self.query_one(f"#base-filter-{name}-from", Input).value.strip()
+                        if from_raw:
+                            from_val = from_raw
+                        to_raw = self.query_one(f"#base-filter-{name}-to", Input).value.strip()
+                        if to_raw:
+                            to_val = to_raw
+                        values[name] = (from_val, to_val) if (from_val is not None or to_val is not None) else None
+                    else:
+                        values[name] = None
+                except Exception:
+                    values[name] = None
+        return values
+
+    def _apply_filters(self) -> None:
+        """Выполнить query и применить фильтры."""
+        engine = getattr(self.app, "query_engine", None)
+        log = self.query_one("#base-results", RichLog)
+        log.clear()
+
+        if not self._query:
+            log.write(f"[italic dim]{_('Query returned no data')}[/italic dim]")
+            return
+
+        if engine is None:
+            log.write(f"[red]{_('Query engine unavailable')}[/red]")
+            return
+
+        try:
+            columns, rows = engine.execute(self._query)
+        except Exception as e:
+            log.write(f"[red]{_('Query error: {error}', error=e)}[/red]")
+            return
+
+        self._columns = columns
+        self._all_rows = rows
+        filter_values = self._collect_filter_values()
+        filtered = [r for r in rows if self._row_matches(r, filter_values)]
+        self._render_results(filtered)
+
+    def _row_matches(self, row: dict, filter_values: dict) -> bool:
+        """Проверить, проходит ли строка через фильтры."""
+        for name, val in filter_values.items():
+            if val is None:
+                continue
+            if isinstance(name, str) and name.startswith("__mode_"):
+                continue
+            actual = row.get(name)
+            if isinstance(val, str):
+                if str(val).lower() not in str(actual).lower():
+                    return False
+            elif isinstance(val, list):
+                if not val:
+                    continue
+                mode = filter_values.get(f"__mode_{name}", "OR")
+                if mode == "AND":
+                    for v in val:
+                        v_matched = False
+                        if isinstance(actual, (list, tuple, set)):
+                            if v in actual or str(v) in [str(x) for x in actual]:
+                                v_matched = True
+                        else:
+                            if str(v).lower() in str(actual).lower():
+                                v_matched = True
+                        if not v_matched:
+                            return False
+                else:
+                    matched = False
+                    for v in val:
+                        if isinstance(actual, (list, tuple, set)):
+                            if v in actual or str(v) in [str(x) for x in actual]:
+                                matched = True
+                                break
+                        else:
+                            if str(v).lower() in str(actual).lower():
+                                matched = True
+                                break
+                    if not matched:
+                        return False
+            elif isinstance(val, tuple) and len(val) == 2:
+                min_val, max_val = val
+                try:
+                    actual_cmp = float(actual) if actual is not None else None
+                except (ValueError, TypeError):
+                    actual_cmp = None
+                if actual_cmp is None:
+                    return False
+                if min_val is not None and actual_cmp < min_val:
+                    return False
+                if max_val is not None and actual_cmp > max_val:
+                    return False
+        return True
+
+    def _render_results(self, rows: list) -> None:
+        """Отрисовать таблицу результатов."""
+        log = self.query_one("#base-results", RichLog)
+        log.clear()
+
+        if not self._columns:
+            log.write(f"[italic dim]{_('Query returned no data')}[/italic dim]")
+            return
+
+        table = Table(expand=False, header_style="bold magenta", border_style="dim")
+        for col in self._columns:
+            table.add_column(str(col))
+        for row in rows:
+            table.add_row(*[str(row.get(c, "")) for c in self._columns])
+        log.write(table)
+        if not rows:
+            log.write(f"[italic dim]{_('0 records')}[/italic dim]")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id and event.input.id.startswith("base-filter-"):
+            self._schedule_apply()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id and event.select.id.startswith("base-filter-"):
+            name = event.select.id[len("base-filter-"):]
+            for fd in self._filter_defs:
+                if not isinstance(fd, dict):
+                    continue
+                if name not in fd:
+                    continue
+                info = fd[name]
+                if isinstance(info, list) and len(info) >= 1 and str(info[0]).lower() == "multi-select":
+                    self._add_multi_select(name, event.select.value)
+                    event.select.value = Select.NULL
+                    break
+            self._schedule_apply()
+
+    def _add_multi_select(self, name: str, value) -> None:
+        """Добавить или убрать значение из набора multi-select фильтра."""
+        if value is None or isinstance(value, NoSelection) or value == Select.NULL:
+            return
+        if name not in self._multi_select_values:
+            self._multi_select_values[name] = set()
+        str_val = str(value)
+        if str_val in self._multi_select_values[name]:
+            self._multi_select_values[name].remove(str_val)
+        else:
+            self._multi_select_values[name].add(str_val)
+        self._update_multi_select_display(name)
+        self._refresh_select_options(name)
+
+    def _update_multi_select_display(self, name: str) -> None:
+        """Обновить текстовое отображение выбранных значений."""
+        try:
+            display = self.query_one(f"#base-filter-{name}-display", Static)
+            selected = sorted(self._multi_select_values.get(name, []))
+            display.update(Text(", ".join(selected), style="yellow") if selected else "")
+        except Exception:
+            pass
+
+    def _refresh_select_options(self, name: str) -> None:
+        """Обновить цвета опций Select: выбранные — жёлтые."""
+        try:
+            sel = self.query_one(f"#base-filter-{name}", Select)
+            selected = self._multi_select_values.get(name, set())
+            new_options = []
+            for opt in sel.options:
+                label, val = opt
+                if str(val) in selected:
+                    new_options.append((Text(str(label), style="yellow"), val))
+                else:
+                    new_options.append((str(label), val))
+            sel.set_options(new_options)
+        except Exception:
+            pass
+
+    def _toggle_multi_select_mode(self, name: str) -> None:
+        """Переключить режим фильтрации multi-select между OR и AND."""
+        current = self._multi_select_modes.get(name, "OR")
+        new_mode = "AND" if current == "OR" else "OR"
+        self._multi_select_modes[name] = new_mode
+        try:
+            btn = self.query_one(f"#base-filter-mode-{name}", Static)
+            btn.update(new_mode)
+        except Exception:
+            pass
+        self._apply_filters()
+
+    def _schedule_apply(self) -> None:
+        """Отложить применение фильтров на 200 мс (debounce)."""
+        self._apply_generation += 1
+        gen = self._apply_generation
+
+        def callback():
+            if gen == self._apply_generation:
+                self._apply_filters()
+
+        self.set_timer(0.2, callback)
+
+    def on_click(self, event: events.Click) -> None:
+        widget = event.control
+        if widget and widget.id:
+            if widget.id.startswith("base-filter-reset-"):
+                name = widget.id[len("base-filter-reset-"):]
+                self._reset_filter(name)
+            elif widget.id.startswith("base-filter-mode-"):
+                name = widget.id[len("base-filter-mode-"):]
+                self._toggle_multi_select_mode(name)
+
+    def _reset_filter(self, name: str) -> None:
+        for fd in self._filter_defs:
+            if not isinstance(fd, dict):
+                continue
+            if name not in fd:
+                continue
+            info = fd[name]
+            if not isinstance(info, list) or len(info) < 1:
+                continue
+            ftype = str(info[0]).lower()
+            try:
+                if ftype == "string":
+                    self.query_one(f"#base-filter-{name}", Input).value = ""
+                elif ftype == "multi-select":
+                    self._multi_select_values.pop(name, None)
+                    try:
+                        display = self.query_one(f"#base-filter-{name}-display", Static)
+                        display.update("")
+                    except Exception:
+                        pass
+                    try:
+                        sel = self.query_one(f"#base-filter-{name}", Select)
+                        sel.value = Select.NULL
+                        self._refresh_select_options(name)
+                    except Exception:
+                        pass
+                elif ftype == "integer":
+                    self.query_one(f"#base-filter-{name}-min", Input).value = ""
+                    self.query_one(f"#base-filter-{name}-max", Input).value = ""
+                elif ftype == "date":
+                    self.query_one(f"#base-filter-{name}-from", Input).value = ""
+                    self.query_one(f"#base-filter-{name}-to", Input).value = ""
+                else:
+                    self.query_one(f"#base-filter-{name}", Input).value = ""
+            except Exception:
+                pass
+            break
+        self._apply_filters()
+
+
+class LinkGraphTree(Tree):
+    """Дерево иерархических связей заметок и тегов."""
+
+    class NoteSelected(Message):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            super().__init__()
+
+    class TagSelected(Message):
+        def __init__(self, tag: str) -> None:
+            self.tag = tag
+            super().__init__()
+
+    def __init__(self, **kwargs):
+        super().__init__("", **kwargs)
+        self.show_root = False
+        self._tag_cache: Dict[str, List[Path]] = {}
+        self._tag_colors: Dict[str, str] = {}
+        self._note_links: Dict[Path, Set[Path]] = {}
+        self._all_md_files: Set[Path] = set()
+
+    def build_graph(
+        self,
+        tag_cache: Dict[str, List[Path]],
+        tag_colors: Dict[str, str],
+        note_links: Dict[Path, Set[Path]],
+        all_md_files: List[Path],
+    ) -> None:
+        """Построить иерархическое дерево связей."""
+        self.clear()
+        self._tag_cache = tag_cache
+        self._tag_colors = tag_colors
+        self._note_links = note_links
+        self._all_md_files = set(all_md_files)
+
+        if not tag_cache and not note_links:
+            self.root.add(_("No data for graph"))
+            return
+
+        # Собираем обратные связи: кто ссылается на заметку
+        back_links: Dict[Path, Set[Path]] = {}
+        for src, targets in note_links.items():
+            for t in targets:
+                back_links.setdefault(t, set()).add(src)
+
+        # Тег -> заметки
+        tag_to_notes: Dict[str, Set[Path]] = {}
+        for tag, files in tag_cache.items():
+            tag_to_notes.setdefault(tag, set()).update(files)
+
+        # Заметка -> теги
+        note_to_tags: Dict[Path, Set[str]] = {}
+        for tag, files in tag_cache.items():
+            for f in files:
+                note_to_tags.setdefault(f, set()).add(tag)
+
+        visited_notes: Set[Path] = set()
+        visited_tags: Set[str] = set()
+
+        def add_note(parent, note: Path, depth: int = 0):
+            if note in visited_notes or depth > 10:
+                return
+            visited_notes.add(note)
+            label = f"📄 {note.name}"
+            node = parent.add(label, expand=True, data={"type": "note", "value": note})
+            # Теги заметки
+            for tag in sorted(note_to_tags.get(note, [])):
+                if tag not in visited_tags:
+                    color = self._tag_colors.get(tag, "cyan")
+                    tag_node = node.add(
+                        f"[bold {color}]#{tag}[/bold {color}]",
+                        expand=True,
+                        data={"type": "tag", "value": tag},
+                    )
+                    visited_tags.add(tag)
+                    # Другие заметки с этим тегом
+                    for other in sorted(tag_to_notes.get(tag, set())):
+                        if other != note and other not in visited_notes:
+                            add_note(tag_node, other, depth + 1)
+            # Прямые ссылки из заметки
+            for target in sorted(self._note_links.get(note, set())):
+                if target not in visited_notes:
+                    add_note(node, target, depth + 1)
+            # Обратные ссылки
+            for src in sorted(back_links.get(note, set())):
+                if src not in visited_notes:
+                    add_note(node, src, depth + 1)
+
+        # Начинаем с тегов верхнего уровня
+        for tag in sorted(tag_cache.keys()):
+            if tag not in visited_tags:
+                color = self._tag_colors.get(tag, "cyan")
+                tag_node = self.root.add(
+                    f"[bold {color}]#{tag}[/bold {color}]",
+                    expand=True,
+                    data={"type": "tag", "value": tag},
+                )
+                visited_tags.add(tag)
+                for note in sorted(tag_to_notes.get(tag, set())):
+                    add_note(tag_node, note)
+
+        # Заметки без тегов, но со ссылками
+        for note in sorted(all_md_files):
+            if note not in visited_notes:
+                if note in self._note_links or note in back_links:
+                    add_note(self.root, note)
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if not data:
+            return
+        if data.get("type") == "note":
+            self.post_message(self.NoteSelected(data["value"]))
+        elif data.get("type") == "tag":
+            self.post_message(self.TagSelected(data["value"]))
+
+
 class TagSearchModal(ModalScreen):
     """Модальное окно поиска по тегам."""
 
@@ -845,6 +1382,38 @@ class TextPromptModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class VerticalSplitter(Static):
+    """Вертикальный разделитель, ширину которого можно менять перетаскиванием."""
+
+    def __init__(self, **kwargs):
+        super().__init__("", **kwargs)
+        self._dragging = False
+        self._drag_start_x = 0
+        self._drag_start_width = 0
+
+    def on_mouse_down(self, event) -> None:
+        self._dragging = True
+        self.capture_mouse()
+        self._drag_start_x = event.screen_x
+        sidebar = self.app.query_one("#sidebar")
+        self._drag_start_width = sidebar.size.width
+
+    def on_mouse_up(self, event) -> None:
+        self._dragging = False
+        self.release_mouse()
+        main_container = self.app.query_one("#main-container")
+        sidebar_width = int(main_container.styles.grid_columns[0].value)
+        self.app.config.save_display_value("sidebar_width", sidebar_width)
+
+    def on_mouse_move(self, event) -> None:
+        if not self._dragging:
+            return
+        delta = event.screen_x - self._drag_start_x
+        new_width = max(10, self._drag_start_width + delta)
+        main_container = self.app.query_one("#main-container")
+        main_container.styles.grid_columns = (new_width, 1, "1fr")
+
+
 # ============================================================================
 # Главное приложение
 # ============================================================================
@@ -875,8 +1444,8 @@ class MarkdownEditorApp(App):
 
     #main-container {
         layout: grid;
-        grid-size: 2 1;
-        grid-columns: 30 1fr;
+        grid-size: 3 1;
+        grid-columns: 30 1 1fr;
         height: 1fr;
     }
 
@@ -884,6 +1453,15 @@ class MarkdownEditorApp(App):
         border: solid $primary-darken-2;
         padding: 0;
         background: $surface;
+    }
+
+    VerticalSplitter {
+        width: 1;
+        background: transparent;
+    }
+
+    VerticalSplitter:hover {
+        background: $primary-lighten-1;
     }
 
     #sidebar-header {
@@ -990,6 +1568,120 @@ class MarkdownEditorApp(App):
     #form-view {
         display: none;
         padding: 1 2;
+    }
+
+    #graph-view {
+        display: none;
+        height: 1fr;
+        padding: 0;
+        background: $background;
+    }
+
+    #graph-view Tree {
+        padding: 0 1;
+        height: 1fr;
+    }
+
+    #base-view {
+        display: none;
+        height: 1fr;
+        padding: 0 1;
+        background: $background;
+    }
+
+    #base-filters {
+        width: auto;
+        height: auto;
+        padding: 0;
+        layout: horizontal;
+    }
+
+    .base-filter-item {
+        width: auto;
+        height: 3;
+        margin-right: 0;
+        padding: 0;
+        content-align: center middle;
+    }
+
+    .base-filter-multiselect-item {
+        height: auto;
+    }
+
+    .base-filter-row {
+        width: auto;
+        height: 3;
+        align: center middle;
+    }
+
+    .base-filter-label {
+        height: 1;
+        color: $text;
+        text-style: bold;
+        margin-right: 1;
+        content-align-vertical: middle;
+    }
+
+    .base-filter-widget {
+        width: auto;
+        height: 1;
+    }
+
+    .base-filter-display {
+        width: 100%;
+        height: auto;
+        color: $text;
+        text-style: italic;
+        padding: 0 1;
+    }
+
+    .base-filter-select {
+        width: 26;
+        height: 1;
+    }
+
+    .base-filter-string {
+        width: 26;
+        height: auto;
+    }
+
+    .base-filter-number {
+        width: 14;
+        height: auto;
+    }
+
+    .base-filter-date {
+        width: 18;
+        height: auto;
+    }
+
+    .base-filter-reset {
+        width: 3;
+        height: 1;
+        min-width: 3;
+        padding: 0;
+        content-align: center middle;
+        border: none;
+        background: transparent;
+        color: $text;
+        text-style: dim;
+    }
+
+    .base-filter-mode {
+        width: 4;
+        height: 1;
+        min-width: 4;
+        padding: 0;
+        content-align: center middle;
+        border: none;
+        background: transparent;
+        color: $text-accent;
+        text-style: bold;
+    }
+
+    #base-results {
+        height: 1fr;
+        padding: 1 0;
     }
 
     #form-fields {
@@ -1127,18 +1819,24 @@ class MarkdownEditorApp(App):
         self.sidebar_visible = True
         self.tag_cache: Dict[str, List[Path]] = {}
         self.tag_colors: Dict[str, str] = {}
+        self.note_links: Dict[Path, Set[Path]] = {}
         self._original_content: str = ""
         self._last_editor_selection = None
         self._file_history: List[Path] = []
+        self._return_to_graph: bool = False
         self.tag_index = TagIndex(self.file_system.root_path)
         self.query_engine = QueryEngine(self.file_system, self.parser, self.tag_index)
         self._rebuild_tag_cache()
 
     def _rebuild_tag_cache(self):
-        """Обновить SQLite-индекс и перезагрузить кэш тегов и цветов."""
-        self.tag_index.rebuild(self.file_system.get_md_files(), self.parser)
+        """Обновить SQLite-индекс и перезагрузить кэш тегов, цветов и связей."""
+        md_files = self.file_system.get_md_files()
+        # Связи перестраиваем ДО тегов, чтобы использовать старые mtime
+        self.tag_index.rebuild_note_links(md_files, self.parser)
+        self.tag_index.rebuild(md_files, self.parser)
         self.tag_cache = self.tag_index.get_tag_files()
         self.tag_colors = self.tag_index.get_tag_colors()
+        self.note_links = self.tag_index.get_note_links()
 
     def _refresh_file_tree(self) -> None:
         """Перестроить дерево файлов с учётом избранного."""
@@ -1180,12 +1878,16 @@ class MarkdownEditorApp(App):
                     yield Label(f"[bold]{_('Tags')}[/bold]")
                     yield TagCloud(id="tag-cloud")
 
+            yield VerticalSplitter(id="splitter")
+
             with Vertical(id="content-area"):
                 yield MarkdownViewer(id="viewer")
                 with Vertical(id="editor-container"):
                     yield EditorToolbar(id="editor-toolbar")
                     yield TextArea(id="editor", language="markdown")
                 yield FormView(id="form-view")
+                yield BaseView(id="base-view")
+                yield LinkGraphTree(id="graph-view")
 
         yield Static("", id="status-bar")
         yield Footer()
@@ -1197,9 +1899,15 @@ class MarkdownEditorApp(App):
         self._refresh_file_tree()
         self._update_tag_cloud()
 
+        sidebar_width = self.config.display.get("sidebar_width", 30)
+        main_container = self.query_one("#main-container")
+        main_container.styles.grid_columns = (sidebar_width, 1, "1fr")
+
         editor = self.query_one("#editor", TextArea)
         self.query_one("#editor-container").display = False
         self.query_one("#form-view", FormView).display = False
+        self.query_one("#base-view", BaseView).display = False
+        self.query_one("#graph-view", LinkGraphTree).display = False
         self._register_markdown_highlights(editor)
         self._apply_editor_syntax_theme(editor)
         self._update_status()
@@ -1211,8 +1919,13 @@ class MarkdownEditorApp(App):
         else:
             editor.theme = self.config.display.get("syntax_theme", "monokai")
 
+    def watch_theme(self, theme: str) -> None:
+        """Сохранить выбранную тему в конфиг при любом изменении."""
+        if getattr(self, "config", None):
+            self.config.save_theme(theme)
+
     def action_toggle_theme(self) -> None:
-        """Переключить светлую / тёмную тему и сохранить выбор."""
+        """Переключить светлую / тёмную тему."""
         if self.theme in _LIGHT_THEMES:
             new_theme = self.config.display.get("app_theme", "textual-dark")
             if new_theme in _LIGHT_THEMES:
@@ -1220,7 +1933,6 @@ class MarkdownEditorApp(App):
         else:
             new_theme = "textual-light"
         self.theme = new_theme
-        self.config.save_theme(new_theme)
         editor = self.query_one("#editor", TextArea)
         self._apply_editor_syntax_theme(editor)
         # Перерисовать открытый файл с новой темой кода
@@ -1276,8 +1988,14 @@ class MarkdownEditorApp(App):
         self._load_file()
 
     def action_go_back(self) -> None:
-        """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра)."""
+        """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра).
+
+        Если последний переход был из дерева связей — вернуться в граф."""
         if self.is_edit_mode:
+            return
+        if self._return_to_graph:
+            self._return_to_graph = False
+            self.show_graph()
             return
         if not self._file_history:
             return
@@ -1287,7 +2005,47 @@ class MarkdownEditorApp(App):
 
     def on_file_tree_file_selected(self, event: FileTree.FileSelected):
         """Обработать выбор файла."""
+        self._return_to_graph = False
         self._navigate_to(event.path)
+
+    def on_file_tree_graph_selected(self, _: FileTree.GraphSelected) -> None:
+        """Показать дерево связей."""
+        self.show_graph()
+
+    def show_graph(self) -> None:
+        """Показать дерево связей и скрыть остальные панели."""
+        viewer = self.query_one("#viewer", MarkdownViewer)
+        editor_container = self.query_one("#editor-container")
+        form = self.query_one("#form-view", FormView)
+        base = self.query_one("#base-view", BaseView)
+        graph = self.query_one("#graph-view", LinkGraphTree)
+
+        viewer.display = False
+        editor_container.display = False
+        form.display = False
+        base.display = False
+        graph.display = True
+        graph.build_graph(
+            self.tag_cache,
+            self.tag_colors,
+            self.note_links,
+            self.file_system.get_md_files(),
+        )
+        graph.focus()
+        self.title = "Impactite — " + _("Link graph")
+        self._update_status()
+
+    def on_link_graph_tree_note_selected(self, event: LinkGraphTree.NoteSelected) -> None:
+        """Открыть заметку из дерева связей."""
+        if event.path.exists() and event.path.is_file():
+            self._return_to_graph = True
+            self._navigate_to(event.path)
+        else:
+            self.notify(_("File not found: {path}", path=str(event.path)), severity="error")
+
+    def on_link_graph_tree_tag_selected(self, event: LinkGraphTree.TagSelected) -> None:
+        """Открыть поиск по тегу из дерева связей."""
+        self.push_screen(TagSearchModal(self.tag_cache, initial_query=event.tag, tag_colors=self.tag_colors))
 
     def _load_file(self):
         """Загрузить текущий файл."""
@@ -1299,26 +2057,40 @@ class MarkdownEditorApp(App):
         editor = self.query_one("#editor", TextArea)
         editor_container = self.query_one("#editor-container")
         form   = self.query_one("#form-view", FormView)
+        base   = self.query_one("#base-view", BaseView)
+        graph  = self.query_one("#graph-view", LinkGraphTree)
 
+        graph.display = False
         if self.is_edit_mode:
             viewer.display = False
             editor_container.display = True
             form.display   = False
+            base.display   = False
             self._original_content = content
             editor.load_text(content)
         else:
             form_def = parse_form_definition(content)
+            base_def = parse_base_definition(content)
             if form_def is not None:
                 viewer.display = False
                 editor_container.display = False
                 form.display   = True
+                base.display   = False
                 form.load_form(form_def["catalog"], form_def["fields"],
                                form_def["destination"])
                 form.focus()
+            elif base_def is not None:
+                viewer.display = False
+                editor_container.display = False
+                form.display   = False
+                base.display   = True
+                base.load_base(base_def["query"], base_def["filters"])
+                base.focus()
             else:
                 viewer.display = True
                 editor_container.display = False
                 form.display   = False
+                base.display   = False
                 viewer.update_content(content)
                 viewer.focus()
 
@@ -1407,6 +2179,7 @@ class MarkdownEditorApp(App):
         if not target.is_absolute():
             target = (self.current_file.parent / target).resolve()
         if target.exists() and target.is_file():
+            self._return_to_graph = False
             self._navigate_to(target)
         else:
             self.notify(_("File not found: {path}", path=str(target)), severity="error")
@@ -1681,6 +2454,7 @@ class MarkdownEditorApp(App):
 
     def on_tag_search_modal_file_selected(self, event: TagSearchModal.FileSelected):
         """Обработать выбор файла из поиска."""
+        self._return_to_graph = False
         self._navigate_to(event.path)
 
     def on_unmount(self) -> None:

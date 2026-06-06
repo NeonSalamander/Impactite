@@ -29,6 +29,7 @@ display:
   syntax_theme: "monokai"     # Тема синтаксиса редактора (monokai, dracula, vscode_dark, github_light)
   code_border: "round"        # Стиль рамки для блоков кода (round, box, double)
   app_theme: "textual-dark"   # Тема приложения: textual-dark, textual-light, solarized-light,
+  sidebar_width: 43
                               # catppuccin-latte, rose-pine-dawn, atom-one-light, dracula, monokai...
 
 # Настройки тегов

@@ -66,6 +66,50 @@ class Config:
         with open(self.config_path, "w", encoding="utf-8") as f:
             f.write(content)
 
+    def save_display_value(self, key: str, value) -> None:
+        """Обновить значение в display-секции конфига, сохранив остальное без изменений."""
+        self.display[key] = value
+        if not os.path.exists(self.config_path):
+            return
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        display_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("display:"):
+                display_idx = i
+                break
+        if display_idx is None:
+            return
+
+        display_indent = len(lines[display_idx]) - len(lines[display_idx].lstrip())
+        item_indent = display_indent + 2
+
+        key_line = None
+        last_item_idx = display_idx
+        for i in range(display_idx + 1, len(lines)):
+            line = lines[i]
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= display_indent:
+                break
+            last_item_idx = i
+            if stripped.startswith(f"{key}:"):
+                key_line = i
+                break
+
+        if key_line is not None:
+            lines[key_line] = re.sub(
+                rf'^(\s*{key}:\s*).+$', f'\\g<1>{value}', lines[key_line]
+            )
+        else:
+            lines.insert(last_item_idx + 1, " " * item_indent + f'{key}: {value}\n')
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
     @classmethod
     def load(cls, config_path: str = "config.yaml") -> "Config":
         """Загрузка конфигурации из YAML файла."""
@@ -89,6 +133,7 @@ class Config:
                 "syntax_theme": "monokai",
                 "code_border": "round",
                 "app_theme": "textual-dark",
+                "sidebar_width": 30,
             },
             "tags": {
                 "show_cloud": True,
@@ -262,6 +307,23 @@ class MarkdownParser:
         except Exception:
             return set()
 
+    def extract_internal_links(self, content: str) -> Set[str]:
+        """Извлечь внутренние ссылки на другие заметки (не URL/почта)."""
+        links: Set[str] = set()
+        for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', content):
+            url = match.group(2)
+            if not re.match(r'^(https?://|mailto:)', url):
+                links.add(url)
+        return links
+
+    def extract_internal_links_from_file(self, path: Path) -> Set[str]:
+        """Извлечь внутренние ссылки из файла."""
+        try:
+            content = path.read_text(encoding="utf-8")
+            return self.extract_internal_links(content)
+        except Exception:
+            return set()
+
     def find_files_by_tag(self, files: List[Path], tag: str) -> List[Tuple[Path, str]]:
         """Найти файлы, содержащие указанный тег."""
         results = []
@@ -314,7 +376,13 @@ class TagIndex:
         self.database = ladybug.Database(str(self.db_path))
         self.connection = ladybug.Connection(self.database)
         self._initialize_schema()
-        print(f"DEBUG: TagIndex initialized with db_path: {self.db_path}")
+
+    def close(self) -> None:
+        """Закрыть соединение с LadybugDB."""
+        if hasattr(self, "connection") and self.connection:
+            self.connection.close()
+        if hasattr(self, "database") and self.database:
+            self.database.close()
 
     def _initialize_schema(self):
         """Create node and relationship tables if they don't exist"""
@@ -367,6 +435,12 @@ class TagIndex:
                 FROM FormRecord TO File
             )
         """)
+        
+        self.connection.execute("""
+            CREATE REL TABLE IF NOT EXISTS LINKS_TO (
+                FROM File TO File
+            )
+        """)
 
     @staticmethod
     def _color_for_tag(tag: str) -> str:
@@ -377,15 +451,6 @@ class TagIndex:
         hue = (hash(tag) & 0x7FFF_FFFF) % 360 / 360.0
         r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-
-
-
-    def close(self) -> None:
-        """Close the LadybugDB connection"""
-        if hasattr(self, 'connection'):
-            self.connection.close()
-        if hasattr(self, 'database'):
-            self.database.close()
 
     def rebuild(self, files: List[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить индекс.
@@ -425,15 +490,6 @@ class TagIndex:
         # Process additions and updates
         for file_path in files_to_add | files_to_update:
             self._add_or_update_file_in_index(file_path, Path(file_path).stat().st_mtime, parser)
-        
-        # Debug: query all tags and files after processing
-        try:
-            tag_result = self.connection.execute("MATCH (t:Tag) RETURN t.name")
-            print("DEBUG: Tags after processing files:")
-            while tag_result.has_next():
-                print("  ", tag_result.get_next()[0])
-        except Exception as e:
-            print("DEBUG: Error querying tags:", e)
         
         # Cleanup orphaned tags
         self._cleanup_orphaned_tags()
@@ -594,6 +650,83 @@ class TagIndex:
             "form_id": form_id,
             "file_path": file_path
         })
+
+    def rebuild_note_links(self, files: List[Path], parser: MarkdownParser) -> None:
+        """Инкрементально обновить связи между заметками.
+
+        Использует те же file_mtimes для определения изменённых файлов.
+        Удаляет связи для удалённых файлов.
+        """
+        current = {str(f) for f in files}
+        cached = {}
+        try:
+            result = self.connection.execute(
+                "MATCH (f:File) RETURN f.path AS path, f.mtime AS mtime"
+            )
+            while result.has_next():
+                row = result.get_next()
+                cached[row[0]] = row[1]
+        except Exception:
+            cached = {}
+
+        cached_paths = set(cached.keys())
+
+        # Удалить связи для удалённых файлов (как source, так и target)
+        for stale in cached_paths - current:
+            self.connection.execute("""
+                MATCH (f:File {path: $path})-[r:LINKS_TO]->()
+                DELETE r
+            """, {"path": stale})
+            self.connection.execute("""
+                MATCH ()-[r:LINKS_TO]->(f:File {path: $path})
+                DELETE r
+            """, {"path": stale})
+
+        for fp in files:
+            path_str = str(fp)
+            try:
+                mtime = fp.stat().st_mtime
+            except OSError:
+                continue
+
+            cached_mtime = cached.get(path_str)
+            if cached_mtime and abs(cached_mtime - mtime) < 0.001:
+                continue
+
+            # Файл изменился — перестраиваем его связи
+            self.connection.execute("""
+                MATCH (f:File {path: $path})-[r:LINKS_TO]->()
+                DELETE r
+            """, {"path": path_str})
+
+            raw_links = parser.extract_internal_links_from_file(fp)
+            for link in raw_links:
+                target = Path(link)
+                if not target.is_absolute():
+                    target = (fp.parent / target).resolve()
+                else:
+                    target = target.resolve()
+                if target.exists() and target.is_file():
+                    self.connection.execute("""
+                        MATCH (f:File {path: $src})
+                        MATCH (t:File {path: $tgt})
+                        MERGE (f)-[r:LINKS_TO]->(t)
+                    """, {"src": path_str, "tgt": str(target)})
+
+    def get_note_links(self) -> Dict[Path, Set[Path]]:
+        """Вернуть {source: {target, ...}} по всем связям."""
+        result: Dict[Path, Set[Path]] = {}
+        try:
+            query_result = self.connection.execute("""
+                MATCH (f:File)-[:LINKS_TO]->(t:File)
+                RETURN f.path AS src, t.path AS tgt
+            """)
+            while query_result.has_next():
+                row = query_result.get_next()
+                result.setdefault(Path(row[0]), set()).add(Path(row[1]))
+        except Exception:
+            pass
+        return result
 
     def get_tag_files(self) -> Dict[str, List[Path]]:
         """Вернуть {тег: [Path, ...]} по всем проиндексированным файлам."""
@@ -840,6 +973,37 @@ def parse_form_definition(content: str) -> Optional[Dict]:
             "catalog": str(fm.get("catalog", "")).strip(),
             "destination": destination,
             "fields": fm.get("fields") or [],
+        }
+    except Exception:
+        return None
+
+
+def parse_base_definition(content: str) -> Optional[Dict]:
+    """Проверить является ли заметка базовой выборкой.
+
+    Возвращает dict {query, filters} если type == base, иначе None.
+
+    filters — список dict'ов вида {name: [type, ...options]}.
+    """
+    if not content.startswith("---"):
+        return None
+    end = content.find("\n---", 3)
+    if end == -1:
+        return None
+    try:
+        fm = yaml.safe_load(content[3:end]) or {}
+        if not isinstance(fm, dict):
+            return None
+        if fm.get("type") != "base":
+            return None
+        raw_filters = fm.get("filters") or []
+        filters = []
+        for item in raw_filters:
+            if isinstance(item, dict):
+                filters.append(item)
+        return {
+            "query": str(fm.get("query", "")).strip(),
+            "filters": filters,
         }
     except Exception:
         return None
