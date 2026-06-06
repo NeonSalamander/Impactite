@@ -31,6 +31,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Query error: {error}": "Ошибка запроса: {error}",
         "Query returned no data": "Запрос не вернул данных",
         "0 records": "0 записей",
+        # Базовые выборки (base)
+        "Filters": "Фильтры",
+        "contains...": "содержит...",
+        "min": "мин",
+        "max": "макс",
+        "from": "от",
+        "to": "до",
         # Формы
         "Save": "Сохранить",
         "Cancel": "Отмена",
@@ -98,6 +105,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Query error: {error}": "Abfragefehler: {error}",
         "Query returned no data": "Abfrage lieferte keine Daten",
         "0 records": "0 Datensätze",
+        # Базовые выборки (base)
+        "Filters": "Filter",
+        "contains...": "enthält...",
+        "min": "min",
+        "max": "max",
+        "from": "von",
+        "to": "bis",
         # Формы
         "Save": "Speichern",
         "Cancel": "Abbrechen",

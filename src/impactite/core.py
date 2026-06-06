@@ -978,6 +978,37 @@ def parse_form_definition(content: str) -> Optional[Dict]:
         return None
 
 
+def parse_base_definition(content: str) -> Optional[Dict]:
+    """Проверить является ли заметка базовой выборкой.
+
+    Возвращает dict {query, filters} если type == base, иначе None.
+
+    filters — список dict'ов вида {name: [type, ...options]}.
+    """
+    if not content.startswith("---"):
+        return None
+    end = content.find("\n---", 3)
+    if end == -1:
+        return None
+    try:
+        fm = yaml.safe_load(content[3:end]) or {}
+        if not isinstance(fm, dict):
+            return None
+        if fm.get("type") != "base":
+            return None
+        raw_filters = fm.get("filters") or []
+        filters = []
+        for item in raw_filters:
+            if isinstance(item, dict):
+                filters.append(item)
+        return {
+            "query": str(fm.get("query", "")).strip(),
+            "filters": filters,
+        }
+    except Exception:
+        return None
+
+
 class QueryEngine:
     """Движок псевдо-SQL запросов к заметкам (frontmatter) и записям форм в БД.
 
