@@ -1303,6 +1303,84 @@ class TagSearchModal(ModalScreen):
         self.dismiss()
 
 
+class FTSSearchModal(ModalScreen):
+    """Модальное окно полнотекстового поиска."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    class FileSelected(Message):
+        def __init__(self, path: Path):
+            self.path = path
+            super().__init__()
+
+    def __init__(self, tag_index: "TagIndex", **kwargs):
+        super().__init__(**kwargs)
+        self.tag_index = tag_index
+        self.current_results: List[Dict] = []
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Label("[bold]Full-text search[/bold]"),
+            Input(placeholder=_("Enter search term"), id="search-input"),
+            OptionList(id="results"),
+            Label(f"[dim]{_('Escape to close')}[/dim]"),
+            id="search-container",
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        query = event.value.strip()
+        results_widget = self.query_one("#results", OptionList)
+        results_widget.clear_options()
+        self.current_results = []
+
+        if not query:
+            return
+
+        try:
+            results = self.tag_index.search_content(query, limit=50)
+        except Exception as e:
+            results_widget.add_option(Option(f"Search error: {e}", id="error"))
+            return
+
+        if not results:
+            results_widget.add_option(Option(_("No files found"), id="empty"))
+            return
+
+        for i, result in enumerate(results):
+            file_path = result["file_path"]
+            score = result["score"]
+            snippet = result["snippet"]
+            display_snippet = snippet.strip()
+            if len(display_snippet) > 120:
+                display_snippet = display_snippet[:117] + "..."
+            display_snippet = escape(display_snippet)
+            option_text = (
+                f"[b]{Path(file_path).name}[/b] "
+                f"[dim](score: {score:.2f})[/dim]\n"
+                f"{display_snippet}"
+            )
+            results_widget.add_option(
+                Option(option_text, id=f"f{i}")
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id and event.option_id.startswith("f"):
+            idx = int(event.option_id[1:])
+            if idx < len(self.current_results):
+                self._open_file(self.current_results[idx]["file_path"])
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self.current_results:
+            self._open_file(self.current_results[0]["file_path"])
+
+    def _open_file(self, file_path: str) -> None:
+        self.post_message(self.FileSelected(Path(file_path)))
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 class UnsavedChangesModal(ModalScreen):
     """Диалог несохранённых изменений."""
 
@@ -1434,6 +1512,7 @@ class MarkdownEditorApp(App):
         Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
         Binding("ctrl+l", "toggle_theme", "Theme"),
         Binding("ctrl+f", "toggle_favorite", "Favorite"),
+        Binding("ctrl+g", "search_fulltext", "Full-text Search"),
         Binding("backspace", "go_back", "Back", show=False),
     ]
 
@@ -1586,6 +1665,30 @@ class MarkdownEditorApp(App):
         display: none;
         height: 1fr;
         padding: 0 1;
+        background: $background;
+    }
+
+    FTSSearchModal {
+        align: center middle;
+        background: $background 50%;
+    }
+
+    FTSSearchModal Container {
+        width: 90%;
+        height: 90%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    FTSSearchModal #search-input {
+        width: 100%;
+        margin: 1 0;
+    }
+
+    FTSSearchModal #results {
+        width: 100%;
+        height: 1fr;
         background: $background;
     }
 
@@ -2317,6 +2420,15 @@ class MarkdownEditorApp(App):
     def action_search_tags(self):
         """Открыть поиск по тегам."""
         self.push_screen(TagSearchModal(self.tag_cache, tag_colors=self.tag_colors))
+
+    def action_search_fulltext(self):
+        """Открыть полнотекстовый поиск в модальном окне."""
+        self.push_screen(FTSSearchModal(self.tag_index))
+
+    def on_fts_search_modal_file_selected(self, event: FTSSearchModal.FileSelected):
+        """Обработать выбор файла из полнотекстового поиска."""
+        self._return_to_graph = False
+        self._navigate_to(event.path)
 
     def on_tool_button_pressed(self, event: ToolButton.Pressed) -> None:
         """Кнопки в шапке боковой панели: создать каталог / заметку."""

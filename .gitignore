@@ -67,4 +67,9 @@ docs/_build/
 
 .rpiv
 samples/.ladybug_index.lbug
+samples/.ladybug_index.lbug.wal
+notes/.ladybug_index.lbug
+notes/.ladybug_index.lbug.wal
+test_fts*.py
 __pycache__/
+.worktrees/

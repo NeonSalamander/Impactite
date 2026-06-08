@@ -417,6 +417,36 @@ class TagIndex:
             )
         """)
         
+        # FTS content table for full-text search
+        self.connection.execute("""
+            CREATE NODE TABLE IF NOT EXISTS FTSContent (
+                file_path STRING PRIMARY KEY,
+                content STRING
+            )
+        """)
+        
+        # Install FTS extension for full-text search
+        try:
+            self.connection.execute('INSTALL fts;')
+            self.connection.execute('LOAD fts;')
+        except Exception:
+            # Extension might already be installed, continue silently
+            pass
+
+        # Create FTS index on FTSContent for full-text search
+        try:
+            self.connection.execute("""
+                CALL CREATE_FTS_INDEX(
+                    'FTSContent',
+                    'fts_content_idx',
+                    ['content'],
+                    stemmer := 'porter'
+                )
+            """)
+        except Exception:
+            # Index might already exist, continue silently
+            pass
+        
         # Relationship tables
         self.connection.execute("""
             CREATE REL TABLE IF NOT EXISTS HAS_TAG_FRONTMatter (
@@ -489,11 +519,42 @@ class TagIndex:
         
         # Process additions and updates
         for file_path in files_to_add | files_to_update:
-            self._add_or_update_file_in_index(file_path, Path(file_path).stat().st_mtime, parser)
+            self._add_or_update_file_in_index(str(file_path), Path(file_path).stat().st_mtime, parser)
         
         # Cleanup orphaned tags
         self._cleanup_orphaned_tags()
-    
+
+        # Recreate FTS index so it picks up all data changes
+        self._recreate_fts_index()
+
+    def _recreate_fts_index(self) -> None:
+        """Drop and recreate FTS index to ensure data is indexed.
+        
+        LadybugDB FTS only indexes data inserted AFTER the index is created.
+        So we must recreate the index after any bulk data changes.
+        """
+        try:
+            self.connection.execute("INSTALL fts;\nLOAD fts;")
+        except Exception:
+            pass
+        try:
+            self.connection.execute(
+                "CALL DROP_FTS_INDEX('FTSContent', 'fts_content_idx')"
+            )
+        except Exception:
+            pass
+        try:
+            self.connection.execute("""
+                CALL CREATE_FTS_INDEX(
+                    'FTSContent',
+                    'fts_content_idx',
+                    ['content'],
+                    stemmer := 'porter'
+                )
+            """)
+        except Exception:
+            pass
+
     def _remove_file_from_index(self, file_path: str) -> None:
         """Remove a file and its associated data from the index"""
         # Delete file node and all its relationships
@@ -501,6 +562,12 @@ class TagIndex:
             MATCH (f:File {path: $path})
             DETACH DELETE f
         """, {"path": file_path})
+        
+        # Remove FTS content for this file
+        self.connection.execute("""
+            MATCH (f:FTSContent {file_path: $file_path})
+            DELETE f
+        """, {"file_path": file_path})
         
         # Note: We do NOT delete associated form records or favorites here to match original behavior
         # Form records and favorites are preserved when a file is deleted from the index
@@ -528,7 +595,7 @@ class TagIndex:
         """, {"file_path": file_path})
         
         # Parse file to extract tags and form data
-        tags_frontmatter, tags_body, form_data = self._parse_file_for_indexing(file_path, parser)
+        tags_frontmatter, tags_body, form_data, content = self._parse_file_for_indexing(file_path, parser)
         
         # Process frontmatter tags
         for tag_name in tags_frontmatter:
@@ -575,6 +642,12 @@ class TagIndex:
         # Process form record if present
         if form_data:
             self._upsert_form_record(file_path, form_data)
+        
+        # Store content for FTS indexing
+        self.connection.execute("""
+            MERGE (f:FTSContent {file_path: $file_path})
+            SET f.content = $content
+        """, {"file_path": file_path, "content": content})
     
     def _cleanup_orphaned_tags(self) -> None:
         """Remove tags that are no longer associated with any files"""
@@ -584,16 +657,18 @@ class TagIndex:
             DETACH DELETE t
         """)
     
-    def _parse_file_for_indexing(self, file_path: str, parser: MarkdownParser) -> Tuple[Set[str], Set[str], Optional[Dict]]:
+    def _parse_file_for_indexing(self, file_path: str, parser: MarkdownParser) -> Tuple[Set[str], Set[str], Optional[Dict], str]:
         """Parse a markdown file to extract frontmatter tags, body tags, and form data"""
         path_obj = Path(file_path)
+        
+        # Read file content
+        content = path_obj.read_text(encoding="utf-8")
         
         # Extract tags with source (frontmatter vs body) using the provided parser
         fm_tags, body_tags = parser.extract_tags_with_source(path_obj)
         
         # Check if this is a form record
         try:
-            content = path_obj.read_text(encoding="utf-8")
             form_def = parse_form_definition(content)
             form_data = None
             if form_def and form_def.get("destination") == "database":
@@ -607,7 +682,7 @@ class TagIndex:
         except Exception:
             form_data = None
             
-        return fm_tags, body_tags, form_data
+        return fm_tags, body_tags, form_data, content
     
     def _generate_deterministic_color(self, tag_name: str) -> str:
         """Generate deterministic HSL->HEX color for a tag"""
@@ -860,6 +935,69 @@ class TagIndex:
 
     # ---- избранное -----------------------------------------------------------
 
+    def search_content(self, query_text: str, limit: int = 10) -> List[Dict]:
+        """Search note content using LadybugDB FTS with BM25 ranking.
+
+        Returns list of dicts with keys: file_path, score, snippet
+        """
+        if not query_text.strip():
+            return []
+
+        try:
+            result = self.connection.execute("""
+                CALL QUERY_FTS_INDEX(
+                    'FTSContent', 'fts_content_idx', $query, top := $limit
+                )
+                RETURN node.file_path AS file_path,
+                       node.content AS content,
+                       score
+                ORDER BY score DESC
+            """, {"query": query_text, "limit": limit})
+
+            processed_results = []
+            while result.has_next():
+                row = result.get_next()
+                file_path = row[0]
+                content = row[1]
+                score = row[2]
+                snippet = self._make_snippet(content, query_text)
+                processed_results.append({
+                    "file_path": file_path,
+                    "score": score,
+                    "snippet": snippet,
+                })
+            return processed_results
+        except Exception:
+            return []
+
+    @staticmethod
+    def _make_snippet(content: str, query: str, context_chars: int = 80) -> str:
+        """Extract a context window around the first query term match."""
+        terms = query.lower().split()
+        lower_content = content.lower()
+
+        best_pos = -1
+        best_term_len = 0
+        for term in terms:
+            pos = lower_content.find(term)
+            if pos != -1 and (best_pos == -1 or pos < best_pos):
+                best_pos = pos
+                best_term_len = len(term)
+
+        if best_pos == -1:
+            return content[:context_chars * 2].strip()
+
+        start = max(0, best_pos - context_chars)
+        end = min(len(content), best_pos + best_term_len + context_chars)
+        snippet = content[start:end].strip()
+
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(content):
+            snippet = snippet + "..."
+
+        return snippet
+
     def add_favorite(self, file_path: Union[str, Path]) -> None:
         """Добавить файл в избранное"""
         try:
@@ -939,7 +1077,7 @@ class TagIndex:
         if parameters is None:
             parameters = {}
         result = self.connection.execute(query, parameters)
-        columns = result.keys()
+        columns = result.get_column_names()
         rows = []
         while result.has_next():
             row = result.get_next()
