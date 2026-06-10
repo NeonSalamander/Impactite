@@ -45,6 +45,7 @@ from impactite.core import (
     parse_form_definition, parse_base_definition,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
+from impactite.templater import collect_templates, build_context, render_template
 
 _LIGHT_THEMES: frozenset[str] = frozenset({
     "textual-light", "solarized-light", "catppuccin-latte",
@@ -1382,6 +1383,57 @@ class TextPromptModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class TemplateSelectModal(ModalScreen[Optional[str]]):
+    """Модальное окно выбора шаблона для создания заметки.
+
+    Показывает список доступных шаблонов из ``templates_path``.
+    Закрывается с именем шаблона (stem файла) или None при отмене.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, templates_dir: Path, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._templates = collect_templates(templates_dir)
+        self._items: list[tuple[str, str, str]] = []
+        for name, fp in self._templates.items():
+            parent = fp.parent.name
+            rel = fp.relative_to(templates_dir).parent
+            category = str(rel).replace(".", "") if str(rel) != "." else ""
+            self._items.append((name, str(fp.stem), category))
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Label(f"[bold]{_('Select template')}[/bold]"),
+            ListView(
+                *[
+                    ListItem(Label(f"[bold]{name}[/bold]"
+                                  f"  [dim]{' — ' + cat if cat else ''}[/dim]"),
+                             name=name)
+                    for name, _stem, cat in self._items
+                ],
+                id="template-list",
+            ),
+            Label(f"[dim]{_('Escape to close')}[/dim]"),
+            id="template-modal-container",
+        )
+
+    def on_mount(self) -> None:
+        lst = self.query_one("#template-list", ListView)
+        lst.focus()
+        if lst.children:
+            lst.index = 0
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.item.name:
+            self.dismiss(event.item.name)
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class VerticalSplitter(Static):
     """Вертикальный разделитель, ширину которого можно менять перетаскиванием."""
 
@@ -1802,13 +1854,30 @@ class MarkdownEditorApp(App):
         width: 100%;
         margin: 1 0;
     }
+
+    #template-modal-container {
+        width: 40;
+        height: auto;
+        margin: 2 4;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #template-modal-container > #template-list {
+        height: auto;
+        max-height: 15;
+        margin: 1 0;
+    }
     """
 
     def __init__(self, config: Config = None):
         super().__init__()
         self.config = config or Config.load()
         set_language(self.config.language)
-        self.file_system = FileSystem(str(self.config.resolve_notes_path()))
+        self.file_system = FileSystem(
+            str(self.config.resolve_notes_path()),
+            templates_subfolder=self.config.templates_path,
+        )
         self.parser = MarkdownParser(
             syntax_theme=self.config.display.get("syntax_theme", "monokai")
         )
@@ -1873,6 +1942,9 @@ class MarkdownEditorApp(App):
                     daily_btn = ToolButton("+📅", id="new-daily-btn", classes="sidebar-btn")
                     daily_btn.tooltip = _("Create daily note")
                     yield daily_btn
+                    tmpl_btn = ToolButton("🧩", id="new-template-btn", classes="sidebar-btn")
+                    tmpl_btn.tooltip = _("From template")
+                    yield tmpl_btn
                     fav_btn = ToolButton("⭐", id="toggle-fav-btn", classes="sidebar-btn")
                     fav_btn.tooltip = _("Toggle favorite")
                     yield fav_btn
@@ -2329,6 +2401,8 @@ class MarkdownEditorApp(App):
             self._prompt_new_note()
         elif event.button_id == "new-daily-btn":
             self._create_daily_note()
+        elif event.button_id == "new-template-btn":
+            self._prompt_template_note()
         elif event.button_id == "toggle-fav-btn":
             self.action_toggle_favorite()
 
@@ -2410,6 +2484,73 @@ class MarkdownEditorApp(App):
         self._load_file()
         self.query_one("#editor", TextArea).focus()
         self.notify(_("Daily note created: {name}", name=filename), severity="information")
+
+    def _prompt_template_note(self) -> None:
+        """Выбрать шаблон, запросить имя и создать заметку по шаблону."""
+        templates_dir = self.config.resolve_templates_path()
+        if not templates_dir.is_dir() or not list(templates_dir.rglob("*.md")):
+            self.notify(_("No templates found"), severity="warning")
+            return
+
+        self.push_screen(TemplateSelectModal(templates_dir), self._on_template_selected)
+
+    def _on_template_selected(self, template_name: Optional[str]) -> None:
+        """Обработчик выбора шаблона — запрашивает имя файла и создаёт заметку."""
+        if not template_name:
+            return
+
+        templates_dir = self.config.resolve_templates_path()
+        all_templates = collect_templates(templates_dir)
+        template_path = all_templates.get(template_name)
+        if not template_path:
+            self.notify(_("Template not found"), severity="error")
+            return
+
+        catalog = self._current_catalog()
+
+        def done(name: Optional[str]) -> None:
+            if not name:
+                return
+            if not name.endswith(".md"):
+                name += ".md"
+            target = catalog / name
+            created = False
+            if not target.exists():
+                # Собираем контекст
+                ctx = build_context(
+                    filepath=target,
+                    title=target.stem,
+                    author=self.config.author,
+                )
+                try:
+                    content = render_template(
+                        template_path.read_text(encoding="utf-8"),
+                        ctx,
+                    )
+                except Exception as e:
+                    self.notify(
+                        _("Template render error: {error}", error=str(e)),
+                        severity="error",
+                    )
+                    return
+                if not self.file_system.write_file(target, content):
+                    self.notify(_("Note creation error"), severity="error")
+                    return
+                created = True
+                self._rebuild_tag_cache()
+                self._update_tag_cloud()
+            self._refresh_file_tree()
+            self._navigate_to(target)
+            self.is_edit_mode = True
+            self._load_file()
+            self.query_one("#editor", TextArea).focus()
+            if created:
+                self.notify(
+                    _("Note created from template: {name}", name=target.name),
+                    severity="information",
+                )
+
+        self.push_screen(TextPromptModal(_("New note name"), _("note name")), done)
 
     def action_refresh(self):
         """Обновить список файлов."""

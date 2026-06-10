@@ -36,6 +36,8 @@ class Config:
     display: Dict[str, any] = field(default_factory=dict)
     tags: Dict[str, any] = field(default_factory=dict)
     daily_notes_folder: str = "Daily notes"
+    templates_path: str = "./templates"
+    author: str = ""
     config_path: str = field(default="config.yaml", repr=False)
 
     def resolve_notes_path(self) -> Path:
@@ -50,6 +52,22 @@ class Config:
         if not p.is_absolute():
             base = Path(self.config_path).expanduser().resolve().parent
             p = base / p
+        return p.resolve()
+
+    def resolve_templates_path(self) -> Path:
+        """Вернуть абсолютный путь к каталогу шаблонов.
+
+        По умолчанию шаблоны находятся внутри каталога заметок в подпапке
+        ``templates_path`` (например, ``notes/templates/``).
+
+        Если ``templates_path`` указан как абсолютный путь или через ``~``,
+        используется он. Если относительный — резолвится относительно
+        каталога заметок (``notes_path``).
+        """
+        p = Path(self.templates_path).expanduser()
+        if not p.is_absolute():
+            notes_root = self.resolve_notes_path()
+            p = notes_root / p
         return p.resolve()
 
     def save_theme(self, theme: str) -> None:
@@ -142,6 +160,8 @@ class Config:
                 "max_tag_size": 3,
             },
             "daily_notes_folder": "Daily notes",
+            "templates_path": "templates",
+            "author": "",
         }
 
         if os.path.exists(config_path):
@@ -162,6 +182,8 @@ class Config:
                     display=loaded.get("display", default_config["display"]),
                     tags=loaded.get("tags", default_config["tags"]),
                     daily_notes_folder=loaded.get("daily_notes_folder", default_config["daily_notes_folder"]),
+                    templates_path=loaded.get("templates_path", default_config["templates_path"]),
+                    author=loaded.get("author", default_config["author"]),
                     config_path=config_path,
                 )
         return cls(config_path=config_path)
@@ -186,10 +208,17 @@ class FileNode:
 class FileSystem:
     """Управление файловой системой."""
 
-    def __init__(self, root_path: str):
+    def __init__(self, root_path: str, templates_subfolder: str = "templates"):
         self.root_path = Path(root_path).expanduser().absolute()
         if not self.root_path.exists():
             self.root_path.mkdir(parents=True, exist_ok=True)
+        # Создаём папку для шаблонов внутри каталога заметок, если её нет
+        self._templates_dir = self.root_path / templates_subfolder
+        if not self._templates_dir.exists():
+            try:
+                self._templates_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass  # могут быть проблемы с правами, не фатально
 
     def get_tree(self) -> FileNode:
         """Получить дерево файлов и директорий."""

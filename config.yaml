@@ -10,6 +10,12 @@ notes_path: "./samples"
 # Folder name for daily notes (created inside notes_path)
 daily_notes_folder: "Daily notes"
 
+# Path to the templates folder (inside notes_path by default, or absolute/~)
+templates_path: "templates"
+
+# Default author name for template placeholders
+author: ""
+
 # Interface language: en (English), ru (Русский), de (Deutsch)
 language: "en"
 
