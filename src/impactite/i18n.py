@@ -57,6 +57,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Создание каталога / заметки
         "Create folder": "Создать каталог",
         "Create note": "Создать заметку",
+        "Create daily note": "Ежедневная заметка",
+        "Daily note created: {name}": "Ежедневная заметка создана: {name}",
         "New folder name": "Имя нового каталога",
         "New note name": "Имя новой заметки",
         "folder name": "имя каталога",
@@ -131,6 +133,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Создание каталога / заметки
         "Create folder": "Ordner erstellen",
         "Create note": "Notiz erstellen",
+        "Create daily note": "Tägliche Notiz",
+        "Daily note created: {name}": "Tägliche Notiz erstellt: {name}",
         "New folder name": "Name des neuen Ordners",
         "New note name": "Name der neuen Notiz",
         "folder name": "Ordnername",

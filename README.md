@@ -11,6 +11,7 @@ Python with the **Rich** and **Textual** libraries.
 - 👁️ **View mode** — rendered Markdown with formatting and scrolling
 - ✅ **Interactive checkboxes** — click task list checkboxes (`- [ ]` / `- [x]`) in view mode to toggle and save them instantly
 - ✏️ **Edit mode** — Markdown syntax highlighting and code highlighting in fenced blocks, with a formatting toolbar
+- 📅 **Daily notes** — one-click daily note creation with pre-filled frontmatter (`type: daily_note`, `date`), auto-stored in a configurable folder (default: `Daily notes/`)
 - 🏷️ **Tag cloud** — all tags with individual colors, clickable
 - 🔍 **Tag search** — modal window with clickable results
 - 🕸️ **Link graph** — hierarchical tree of note-tag relationships; all nodes clickable (notes open, tags search)
@@ -135,6 +136,9 @@ current directory, but you can pass a path explicitly:
 #   - relative path:        "./notes" (resolved RELATIVE TO this config file)
 notes_path: "./notes"
 
+# Folder where daily notes are saved (inside notes_path)
+daily_notes_folder: "Daily notes"
+
 # Interface language: en (English), ru (Русский), de (Deutsch)
 language: "en"
 
@@ -179,6 +183,7 @@ tags:
 | `display.app_theme` | Application theme. Saved automatically when toggled (`Ctrl+L`). |
 | `tags.show_cloud` | Whether to show the tag cloud. |
 | `tags.min_tag_size` / `max_tag_size` | The "weight" range of tags in the cloud. |
+| `daily_notes_folder` | Subfolder inside `notes_path` where daily notes are saved (default: `"Daily notes"`). |
 
 ### Application themes (`app_theme`)
 

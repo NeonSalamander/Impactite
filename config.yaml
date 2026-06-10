@@ -4,10 +4,13 @@
 # Можно указать любой каталог:
 #   - абсолютный путь:      "/home/user/Documents/MyNotes"
 #   - с домашним каталогом: "~/Notes"
-#   - относительный путь:   "./notes" (считается ОТНОСИТЕЛЬНО этого конфиг-файла)
+# Path to the folder with markdown files.
 notes_path: "./samples"
 
-# Язык интерфейса: en (English), ru (Русский), de (Deutsch)
+# Folder name for daily notes (created inside notes_path)
+daily_notes_folder: "Daily notes"
+
+# Interface language: en (English), ru (Русский), de (Deutsch)
 language: "en"
 
 # Горячие клавиши

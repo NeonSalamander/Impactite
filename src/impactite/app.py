@@ -1870,6 +1870,9 @@ class MarkdownEditorApp(App):
                     new_note = ToolButton("+📄", id="new-note-btn", classes="sidebar-btn")
                     new_note.tooltip = _("Create note")
                     yield new_note
+                    daily_btn = ToolButton("+📅", id="new-daily-btn", classes="sidebar-btn")
+                    daily_btn.tooltip = _("Create daily note")
+                    yield daily_btn
                     fav_btn = ToolButton("⭐", id="toggle-fav-btn", classes="sidebar-btn")
                     fav_btn.tooltip = _("Toggle favorite")
                     yield fav_btn
@@ -2324,6 +2327,8 @@ class MarkdownEditorApp(App):
             self._prompt_new_folder()
         elif event.button_id == "new-note-btn":
             self._prompt_new_note()
+        elif event.button_id == "new-daily-btn":
+            self._create_daily_note()
         elif event.button_id == "toggle-fav-btn":
             self.action_toggle_favorite()
 
@@ -2376,6 +2381,35 @@ class MarkdownEditorApp(App):
                 self.notify(_("Note created: {name}", name=target.name), severity="information")
 
         self.push_screen(TextPromptModal(_("New note name"), _("note name")), done)
+
+    def _create_daily_note(self) -> None:
+        """Создать ежедневную заметку с предзаполненным frontmatter."""
+        from datetime import date
+
+        today = date.today()
+        filename = today.strftime("%d.%m.%Y") + ".md"
+
+        # Каталог для ежедневных заметок — внутри корня заметок
+        daily_folder_name = self.config.daily_notes_folder
+        catalog = self.file_system.root_path / daily_folder_name
+        catalog.mkdir(parents=True, exist_ok=True)
+
+        target = catalog / filename
+        if not target.exists():
+            date_str = today.isoformat()  # 2026-06-10
+            frontmatter = f"---\ntype: daily_note\ndate: {date_str}\n---\n\n"
+            if not self.file_system.write_file(target, frontmatter):
+                self.notify(_("Note creation error"), severity="error")
+                return
+            self._rebuild_tag_cache()
+            self._update_tag_cloud()
+
+        self._refresh_file_tree()
+        self._navigate_to(target)
+        self.is_edit_mode = True
+        self._load_file()
+        self.query_one("#editor", TextArea).focus()
+        self.notify(_("Daily note created: {name}", name=filename), severity="information")
 
     def action_refresh(self):
         """Обновить список файлов."""

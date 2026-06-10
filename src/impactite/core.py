@@ -35,6 +35,7 @@ class Config:
     hotkeys: Dict[str, str] = field(default_factory=dict)
     display: Dict[str, any] = field(default_factory=dict)
     tags: Dict[str, any] = field(default_factory=dict)
+    daily_notes_folder: str = "Daily notes"
     config_path: str = field(default="config.yaml", repr=False)
 
     def resolve_notes_path(self) -> Path:
@@ -139,7 +140,8 @@ class Config:
                 "show_cloud": True,
                 "min_tag_size": 1,
                 "max_tag_size": 3,
-            }
+            },
+            "daily_notes_folder": "Daily notes",
         }
 
         if os.path.exists(config_path):
@@ -159,6 +161,7 @@ class Config:
                     hotkeys=loaded.get("hotkeys", default_config["hotkeys"]),
                     display=loaded.get("display", default_config["display"]),
                     tags=loaded.get("tags", default_config["tags"]),
+                    daily_notes_folder=loaded.get("daily_notes_folder", default_config["daily_notes_folder"]),
                     config_path=config_path,
                 )
         return cls(config_path=config_path)
