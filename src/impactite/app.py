@@ -46,6 +46,7 @@ from impactite.core import (
 )
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.templater import collect_templates, build_context, render_template
+from impactite.table_engine import process_table_with_formulas
 
 _LIGHT_THEMES: frozenset[str] = frozenset({
     "textual-light", "solarized-light", "catppuccin-latte",
@@ -354,8 +355,12 @@ class MarkdownViewer(Static):
         in_code_block = False
         code_lines = []
         code_language = ""
+        skip_until = -1
 
         for line_idx, line in enumerate(lines):
+            if line_idx <= skip_until:
+                continue
+
             code_match = re.match(r"^```(\w*)", line)
             if code_match:
                 if not in_code_block:
@@ -389,6 +394,19 @@ class MarkdownViewer(Static):
             if in_code_block:
                 code_lines.append(line)
                 continue
+
+            # Таблицы Markdown с формулами
+            if line.strip().startswith("|"):
+                table, next_idx = process_table_with_formulas(lines, line_idx)
+                if table:
+                    self._render_table(log, table)
+                    vis_height = len(table.rows) + 2
+                    for _ in range(vis_height):
+                        self._tag_lines.append(None)
+                        self._checkbox_lines.append(None)
+                        self._link_lines.append(None)
+                    skip_until = next_idx - 1
+                    continue
 
             # Чекбоксы
             cb_match = re.match(r'^(\s*)([-*])\s+\[([ xX])\]\s+(.*)', line)
@@ -503,6 +521,43 @@ class MarkdownViewer(Static):
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+
+    def _render_table(self, log, table) -> None:
+        """Отрендерить MarkdownTable в RichLog через rich.table.Table."""
+        from rich.text import Text
+
+        rich_table = Table(
+            show_header=table.has_header,
+            expand=False,
+            border_style="dim",
+            pad_edge=False,
+        )
+        num_cols = table.num_cols
+
+        header_row = table.rows[0] if table.has_header and table.rows else None
+        for c in range(num_cols):
+            header = header_row[c].value if header_row and c < len(header_row) else ""
+            rich_table.add_column(header)
+
+        start = 1 if table.has_header else 0
+        for r_idx in range(start, len(table.rows)):
+            row = table.rows[r_idx]
+            cells = []
+            for c_idx, cell in enumerate(row):
+                text = cell.value
+                if cell.computed:
+                    cells.append(Text(text, style="italic cyan"))
+                else:
+                    formatted, _ = self._process_formatting_inline(text)
+                    if "[" in formatted and "]" in formatted:
+                        cells.append(Text.from_markup(formatted))
+                    else:
+                        cells.append(formatted)
+            while len(cells) < num_cols:
+                cells.append("")
+            rich_table.add_row(*cells)
+
+        log.write(rich_table)
 
     def _process_formatting_inline(self, line: str) -> tuple[str, list]:
         """Обработать inline-форматирование markdown.
