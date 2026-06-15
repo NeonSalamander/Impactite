@@ -1,4 +1,32 @@
 # ====== Python / Django ======
+#SDD
+.specify/
+
+# Конфигурации и секреты Hermes
+.env
+.env.local
+.hermes/
+.hermes-docker/
+
+# Логи работы агента и история сессий
+logs/
+.hermes-history/
+*.log
+
+# Временные файлы браузера и генерации контента
+temp_vision_images/
+tmp/
+data/
+
+# Кэш менеджера пакетов uv / python (если агент ставит зависимости локально)
+.uv-cache/
+.pip-cache/
+__pycache__/
+venv/
+.notebooklm-*/
+
+
+
 # Байт-код и кэш
 __pycache__/
 *.py[cod]
@@ -67,3 +95,5 @@ docs/_build/
 
 .rpiv
 samples/.ladybug_index.lbug
+.ladybug_index.lbug
+.impactite_fts.db

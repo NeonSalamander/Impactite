@@ -41,8 +41,8 @@ from textual.widgets.selection_list import Selection
 from textual.widgets._select import NoSelection
 
 from impactite.core import (
-    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, QueryEngine, TagIndex,
-    parse_form_definition, parse_base_definition,
+    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, QueryEngine, SearchState, TagIndex,
+    find_matches, parse_form_definition, parse_base_definition,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.templater import collect_templates, build_context, render_template
@@ -1542,6 +1542,121 @@ class SearchView(Vertical):
             self.post_message(self.NextMatch())
 
 
+class InNoteSearch(ModalScreen):
+    """Модальный диалог поиска по текущей заметке."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", priority=True),
+        Binding("f3", "next", "Next result", priority=True),
+        Binding("shift+f3", "prev", "Prev result", priority=True),
+        Binding("enter", "next", "Next result", show=False, priority=True),
+    ]
+
+    class QueryChanged(Message):
+        """Пользователь изменил запрос."""
+
+        def __init__(self, query: str) -> None:
+            self.query = query
+            super().__init__()
+
+    class PrevMatch(Message):
+        pass
+
+    class NextMatch(Message):
+        pass
+
+    DEFAULT_CSS = """
+    InNoteSearch {
+        align: center top;
+        background: transparent;
+    }
+
+    InNoteSearch #in-note-search-container {
+        width: 60;
+        height: auto;
+        max-height: 20%;
+        margin-top: 1;
+        background: $surface;
+        border: thick $primary;
+    }
+
+    InNoteSearch #in-note-search-title {
+        height: 1;
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    InNoteSearch #in-note-search-input {
+        width: 1fr;
+        margin: 0 1 1 1;
+    }
+
+    InNoteSearch #in-note-search-nav {
+        height: auto;
+        margin: 0 1 1 1;
+    }
+
+    InNoteSearch #in-note-search-status {
+        width: 1fr;
+        height: 1;
+        content-align: right middle;
+        color: $text;
+        text-style: dim;
+    }
+    """
+
+    def __init__(self, initial_query: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.initial_query = initial_query
+
+    def compose(self) -> ComposeResult:
+        with Container(id="in-note-search-container"):
+            yield Label(_("Search in note"), id="in-note-search-title")
+            yield Input(placeholder=_("Find in note..."), value=self.initial_query, id="in-note-search-input")
+            with Horizontal(id="in-note-search-nav"):
+                prev_btn = ToolButton("▲", id="in-note-search-prev", classes="search-nav-btn")
+                prev_btn.tooltip = _("Previous result")
+                yield prev_btn
+                next_btn = ToolButton("▼", id="in-note-search-next", classes="search-nav-btn")
+                next_btn.tooltip = _("Next result")
+                yield next_btn
+                yield Label("", id="in-note-search-status")
+
+    def on_mount(self) -> None:
+        input_widget = self.query_one("#in-note-search-input", Input)
+        input_widget.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "in-note-search-input":
+            self.post_message(self.QueryChanged(event.value))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "in-note-search-input":
+            self.post_message(self.NextMatch())
+
+    def on_tool_button_pressed(self, event: ToolButton.Pressed) -> None:
+        if event.button_id == "in-note-search-prev":
+            self.post_message(self.PrevMatch())
+        elif event.button_id == "in-note-search-next":
+            self.post_message(self.NextMatch())
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def action_next(self) -> None:
+        self.post_message(self.NextMatch())
+
+    def action_prev(self) -> None:
+        self.post_message(self.PrevMatch())
+
+    def update_status(self, current: int, total: int) -> None:
+        label = self.query_one("#in-note-search-status", Label)
+        if total <= 0:
+            label.update(_("No matches"))
+        else:
+            label.update(_("Result {current} / {total}", current=current + 1, total=total))
+
+
 class TagSearchModal(ModalScreen):
     """Модальное окно поиска по тегам."""
 
@@ -1833,6 +1948,7 @@ class MarkdownEditorApp(App):
         Binding("ctrl+f", "toggle_search_mode", "Search"),
         Binding("f3", "search_next", "Next result"),
         Binding("shift+f3", "search_prev", "Prev result"),
+        Binding("f7", "search_in_note", "Find in note", show=False, priority=True),
         Binding("ctrl+shift+f", "toggle_favorite", "Favorite"),
         Binding("ctrl+l", "toggle_theme", "Theme"),
         Binding("ctrl+question", "help", "Help"),
@@ -2387,6 +2503,10 @@ class MarkdownEditorApp(App):
         self._current_match_index: int = 0
         self._search_results: List[Dict[str, Any]] = []
 
+        # Поиск по текущей заметке
+        self._in_note_search: SearchState = SearchState()
+        self._in_note_search_global_backup: Optional[Dict[str, Any]] = None
+
     def _rebuild_tag_cache(self):
         """Обновить SQLite-индекс и перезагрузить кэш тегов, цветов и связей."""
         md_files = self.file_system.get_md_files()
@@ -2464,6 +2584,9 @@ class MarkdownEditorApp(App):
     def on_mount(self):
         """Инициализация после монтирования."""
         retranslate_bindings(self)
+        hotkey = self.config.hotkeys.get("search_in_note", "f7")
+        if hotkey and hotkey.lower() != "f7":
+            self.bind(hotkey, "search_in_note", description=_("Find in note"), show=False)
         self.refresh_bindings()
         self._refresh_file_tree()
         self._update_tag_cloud()
@@ -2513,8 +2636,172 @@ class MarkdownEditorApp(App):
 
     def action_toggle_search_mode(self) -> None:
         """Переключить режим боковой панели (файлы / поиск)."""
+        if self._in_note_search.is_active:
+            return
         new_mode = "search" if self.sidebar_mode == "files" else "files"
         self._set_sidebar_mode(new_mode)
+
+    def action_search_in_note(self) -> None:
+        """Открыть диалог поиска по текущей заметке."""
+        if not self.current_file or self._in_note_search.is_active:
+            return
+        self._close_in_note_search_global_backup()
+        self._in_note_search_global_backup = {
+            "query": self._search_query,
+            "terms": list(self._search_terms),
+            "matches": list(self._search_matches),
+            "index": self._current_match_index,
+        }
+        self._in_note_search = SearchState(is_active=True)
+        self.push_screen(
+            InNoteSearch(initial_query=self._in_note_search.query),
+            callback=self._on_in_note_search_closed,
+        )
+
+    def _close_in_note_search_global_backup(self) -> None:
+        """Восстановить состояние глобального поиска, если диалог уже открыт."""
+        if self._in_note_search_global_backup is not None:
+            backup = self._in_note_search_global_backup
+            self._search_query = backup["query"]
+            self._search_terms = backup["terms"]
+            self._search_matches = backup["matches"]
+            self._current_match_index = backup["index"]
+            self._in_note_search_global_backup = None
+
+    def _on_in_note_search_closed(self, _: Any) -> None:
+        """Закрытие диалога поиска по заметке: снять подсветку и восстановить фокус."""
+        self._in_note_search.is_active = False
+        self._in_note_search = SearchState()
+        self._close_in_note_search_global_backup()
+        if self.current_file:
+            self._load_file()
+        self._focus_current_content()
+
+    def _focus_current_content(self) -> None:
+        """Вернуть фокус просмотрщику или редактору."""
+        try:
+            viewer = self.query_one("#viewer", MarkdownViewer)
+            editor_container = self.query_one("#editor-container")
+            if editor_container.display:
+                self.query_one("#editor", TextArea).focus()
+            elif viewer.display:
+                viewer.focus()
+        except Exception:
+            pass
+
+    def _close_in_note_search(self) -> None:
+        """Закрыть модальный диалог поиска по заметке, если он активен."""
+        if not self._in_note_search.is_active:
+            return
+        try:
+            self.pop_screen()
+        except Exception:
+            self._on_in_note_search_closed(None)
+
+    def _current_note_content_for_search(self) -> str:
+        """Текущее содержимое заметки (из редактора или файла)."""
+        if self.is_edit_mode:
+            try:
+                return self.query_one("#editor", TextArea).text
+            except Exception:
+                return ""
+        if self.current_file:
+            return self.file_system.read_file(self.current_file)
+        return ""
+
+    def _update_in_note_search(self, query: str) -> None:
+        """Пересчитать совпадения для нового запроса и применить подсветку."""
+        self._in_note_search.query = query
+        self._in_note_search.current_index = 0
+        self._in_note_search.matches = []
+        if query.strip() and self.current_file:
+            content = self._current_note_content_for_search()
+            self._in_note_search.matches = find_matches(content, query)
+            self._apply_in_note_match()
+        elif self.current_file:
+            self._load_file()
+        self._update_in_note_status()
+
+    def _apply_in_note_match(self) -> None:
+        """Выделить текущее совпадение поиска по заметке."""
+        if not self._in_note_search.matches or not self.current_file:
+            return
+        idx = self._in_note_search.current_index % len(self._in_note_search.matches)
+        match = self._in_note_search.matches[idx]
+        viewer = self.query_one("#viewer", MarkdownViewer)
+        editor = self.query_one("#editor", TextArea)
+        if viewer.display:
+            content = self._current_note_content_for_search()
+            viewer.update_content(content, [self._in_note_search.query], idx)
+        elif editor.display:
+            from textual.widgets.text_area import Selection
+            query_len = len(self._in_note_search.query)
+            editor.selection = Selection(
+                (match.line, match.column), (match.line, match.column + query_len)
+            )
+            editor.scroll_cursor_visible()
+
+    def _update_in_note_status(self) -> None:
+        """Обновить счётчик совпадений в диалоге."""
+        try:
+            dialog = self.query_one(InNoteSearch)
+        except Exception:
+            return
+        if self._in_note_search.matches:
+            dialog.update_status(self._in_note_search.current_index, len(self._in_note_search.matches))
+        else:
+            dialog.update_status(0, 0)
+
+    def on_in_note_search_query_changed(self, event: InNoteSearch.QueryChanged) -> None:
+        """Пользователь изменил запрос в диалоге."""
+        self._update_in_note_search(event.query)
+
+    def on_in_note_search_next_match(self, _: InNoteSearch.NextMatch) -> None:
+        """Следующее совпадение в текущей заметке."""
+        self._in_note_search.select_next()
+        self._apply_in_note_match()
+        self._update_in_note_status()
+
+    def on_in_note_search_prev_match(self, _: InNoteSearch.PrevMatch) -> None:
+        """Предыдущее совпадение в текущей заметке."""
+        self._in_note_search.select_prev()
+        self._apply_in_note_match()
+        self._update_in_note_status()
+
+    def action_search_next(self) -> None:
+        """Следующее совпадение (F3)."""
+        if self._in_note_search.is_active:
+            self.on_in_note_search_next_match(InNoteSearch.NextMatch())
+            return
+        self._search_next()
+
+    def action_search_prev(self) -> None:
+        """Предыдущее совпадение (Shift+F3)."""
+        if self._in_note_search.is_active:
+            self.on_in_note_search_prev_match(InNoteSearch.PrevMatch())
+            return
+        self._search_prev()
+
+    def action_toggle_edit(self):
+        """Переключить режим редактирования."""
+        if self._in_note_search.is_active:
+            self._close_in_note_search()
+        if not self.current_file:
+            return
+
+        # При выходе из редактора — сохранить изменения
+        if self.is_edit_mode:
+            editor = self.query_one("#editor", TextArea)
+            if editor.text != self._original_content:
+                self.file_system.write_file(self.current_file, editor.text)
+                self._rebuild_tag_cache()
+                self._update_tag_cloud()
+
+        self.is_edit_mode = not self.is_edit_mode
+        # _load_file сам выберет режим: форма / просмотр / редактор
+        self._load_file()
+        if self.is_edit_mode:
+            self.query_one("#editor", TextArea).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Запускаем поиск по Enter в строке поиска."""

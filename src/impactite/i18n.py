@@ -123,6 +123,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Previous result": "Предыдущий результат",
         "Next result": "Следующий результат",
         "Clear": "Очистить",
+        # Поиск по текущей заметке
+        "Search in note": "Поиск по заметке",
+        "Find in note...": "Искать в заметке...",
+        "No matches": "Нет совпадений",
     },
     "de": {
         # Виджеты / просмотр
@@ -225,6 +229,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Previous result": "Vorheriges Ergebnis",
         "Next result": "Nächstes Ergebnis",
         "Clear": "Löschen",
+        # Suche in aktueller Notiz
+        "Search in note": "In Notiz suchen",
+        "Find in note...": "In Notiz suchen...",
+        "No matches": "Keine Treffer",
     },
 }
 

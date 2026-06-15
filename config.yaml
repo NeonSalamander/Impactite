@@ -26,6 +26,7 @@ hotkeys:
   view_mode: "v"              # Переключить режим просмотра
   save_file: "ctrl+s"         # Сохранить файл
   search_tags: "ctrl+t"       # Поиск по тегам
+  search_in_note: "f7"        # Поиск по текущей заметке
   close_search: "escape"      # Закрыть поиск/диалог
   quit: "ctrl+q"              # Выход
   refresh: "ctrl+r"           # Обновить список файлов

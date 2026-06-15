@@ -142,6 +142,7 @@ class Config:
                 "view_mode": "v",
                 "save_file": "ctrl+s",
                 "search_tags": "ctrl+t",
+                "search_in_note": "f7",
                 "close_search": "escape",
                 "quit": "ctrl+q",
                 "refresh": "ctrl+r",
@@ -204,6 +205,64 @@ class FileNode:
         if self.is_dir != other.is_dir:
             return self.is_dir
         return self.name.lower() < other.name.lower()
+
+
+@dataclass
+class Match:
+    """Одно совпадение подстроки в тексте заметки."""
+    start: int
+    end: int
+    line: int = 0
+    column: int = 0
+
+
+@dataclass
+class SearchState:
+    """Состояние поиска по текущей открытой заметке."""
+    query: str = ""
+    matches: List["Match"] = field(default_factory=list)
+    current_index: int = -1
+    is_active: bool = False
+
+    @property
+    def total(self) -> int:
+        return len(self.matches)
+
+    def select_next(self) -> None:
+        if not self.matches:
+            self.current_index = -1
+            return
+        self.current_index = (self.current_index + 1) % len(self.matches)
+
+    def select_prev(self) -> None:
+        if not self.matches:
+            self.current_index = -1
+            return
+        self.current_index = (self.current_index - 1) % len(self.matches)
+
+
+def find_matches(text: str, query: str) -> List[Match]:
+    """Найти все вхождения query в text (без учёта регистра, литеральная подстрока).
+
+    Возвращает список непересекающихся совпадений с позициями в строках и столбцах.
+    """
+    if not query or not text:
+        return []
+    query_lower = query.lower()
+    q_len = len(query)
+    matches: List[Match] = []
+    offset = 0
+    for lnum, line in enumerate(text.split("\n")):
+        start = 0
+        while True:
+            idx = line.lower().find(query_lower, start)
+            if idx == -1:
+                break
+            match_start = offset + idx
+            matches.append(Match(match_start, match_start + q_len, lnum, idx))
+            start = idx + q_len
+        offset += len(line) + 1
+    return matches
 
 
 class FileSystem:
