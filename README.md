@@ -47,6 +47,27 @@ uv run python -m impactite
 uv run impactite path/to/config.yaml
 ```
 
+## MCP server mode
+
+Impactite can also run as an [MCP](https://modelcontextprotocol.io/) server over
+stdio, exposing tools for reading, writing, searching, and analyzing notes.
+This lets external clients interact with the same vault and indexes used by the TUI.
+
+```bash
+# Start the MCP server (reads config.yaml by default)
+uv run impactite --mcp
+
+# With an explicit config path
+uv run impactite --mcp path/to/config.yaml
+```
+
+The server exposes `get_note`, `list_notes`, `search_notes`, `create_note`,
+`update_note`, `fill_form`, `get_note_types`, `get_type_schema`,
+`list_notes_by_type`, `fulltext_search`, `search_similar_notes`,
+`get_note_statistics`, `find_notes_by_date_range`, and
+`get_notes_linked_to_project`. See `specs/002-mcp-server/contracts/mcp-tools.md`
+for full tool schemas.
+
 ## Installing as an executable command
 
 So you don't have to launch the app through `uv run` every time, you can install

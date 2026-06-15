@@ -3704,7 +3704,15 @@ def main():
     """Точка входа приложения."""
     import sys
 
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    args = sys.argv[1:]
+    if args and args[0] == "--mcp":
+        from impactite.mcp_server import run_mcp
+
+        config_path = args[1] if len(args) > 1 else "config.yaml"
+        run_mcp(Config.load(config_path))
+        return
+
+    config_path = args[0] if args else "config.yaml"
     config = Config.load(config_path)
 
     app = MarkdownEditorApp(config)
