@@ -6,7 +6,7 @@
 import re
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Any, Tuple
 
 from rich.console import Console
 from rich.markup import escape
@@ -41,7 +41,7 @@ from textual.widgets.selection_list import Selection
 from textual.widgets._select import NoSelection
 
 from impactite.core import (
-    Config, FileNode, FileSystem, MarkdownParser, QueryEngine, TagIndex,
+    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, QueryEngine, TagIndex,
     parse_form_definition, parse_base_definition,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
@@ -81,6 +81,22 @@ class TagCloud(ListView):
         event.stop()
         if event.item.name:
             self.post_message(self.TagClicked(event.item.name))
+
+
+class EditorTextArea(TextArea):
+    """Редактор с явной подсветкой текущего поискового совпадения."""
+
+    DEFAULT_CSS = """
+    EditorTextArea .text-area--selection {
+        background: #ffcc00 !important;
+        color: #000000 !important;
+        text-style: bold !important;
+    }
+
+    EditorTextArea .text-area--cursor-line {
+        background: $primary 30%;
+    }
+    """
 
 
 class FileTree(Tree):
@@ -335,9 +351,20 @@ class MarkdownViewer(Static):
                 return tag
         return None
 
-    def update_content(self, content: str):
-        """Обновить содержимое."""
+    def update_content(
+        self,
+        content: str,
+        search_terms: Optional[List[str]] = None,
+        current_match_index: int = 0,
+    ):
+        """Обновить содержимое.
+
+        Параметры поиска используются для подсветки найденных лексем.
+        """
         self._content = content
+        self._search_terms = search_terms or []
+        self._current_match_index = current_match_index
+        self._line_highlights: Dict[int, List[Tuple[int, int, bool]]] = {}
         self._tag_lines = []
         self._checkbox_lines = []
         self._link_lines = []
@@ -352,6 +379,12 @@ class MarkdownViewer(Static):
             return
 
         lines = content.split("\n")
+        self._line_highlights = self._find_highlights(lines, self._search_terms, current_match_index)
+        self._current_match_line: Optional[int] = None
+        for lnum, hls in self._line_highlights.items():
+            if any(is_current for _, _, is_current in hls):
+                self._current_match_line = lnum
+                break
         in_code_block = False
         code_lines = []
         code_language = ""
@@ -399,7 +432,7 @@ class MarkdownViewer(Static):
             if line.strip().startswith("|"):
                 table, next_idx = process_table_with_formulas(lines, line_idx)
                 if table:
-                    self._render_table(log, table)
+                    self._render_table(log, table, lines, line_idx)
                     vis_height = len(table.rows) + 2
                     for _ in range(vis_height):
                         self._tag_lines.append(None)
@@ -413,13 +446,14 @@ class MarkdownViewer(Static):
             if cb_match:
                 indent_str, _bullet, checked, text = cb_match.groups()
                 is_checked = checked.lower() == 'x'
-                prefix = " " * len(indent_str)
+                prefix_spaces = " " * len(indent_str)
                 checkbox_display = f"[bold green]{escape('[x]')}[/bold green]" if is_checked else f"[bold red]{escape('[ ]')}[/bold red]"
-                formatted_text, links = self._process_formatting_inline(text)
-                log.write(f"{prefix}{checkbox_display} {formatted_text}")
-                cb_start = len(prefix)
+                pre_len = len(indent_str) + 3 + 1  # indent + [x]/[ ] + space
+                formatted_text, links = self._process_formatting_inline(self._apply_highlights_range(text, line_idx, pre_len))
+                log.write(f"{prefix_spaces}{checkbox_display} {formatted_text}")
+                cb_start = len(prefix_spaces)
                 cb_end = cb_start + 3
-                offset = len(prefix) + len(checkbox_display) + 1
+                offset = len(prefix_spaces) + 4
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
                               "target": l["target"], "text": l["text"]} for l in links] if links else None
                 self._checkbox_lines.append({
@@ -433,23 +467,23 @@ class MarkdownViewer(Static):
 
             # Заголовки
             if line.startswith("# "):
-                log.write(f"[bold magenta]{line[2:]}[/bold magenta]")
+                log.write(f"[bold magenta]{self._apply_highlights_range(line[2:], line_idx, 2)}[/bold magenta]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
             elif line.startswith("## "):
-                log.write(f"[bold blue]{line[3:]}[/bold blue]")
+                log.write(f"[bold blue]{self._apply_highlights_range(line[3:], line_idx, 3)}[/bold blue]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
             elif line.startswith("### "):
-                log.write(f"[bold green]{line[4:]}[/bold green]")
+                log.write(f"[bold green]{self._apply_highlights_range(line[4:], line_idx, 4)}[/bold green]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
             # Списки
             elif line.startswith("- ") or line.startswith("* "):
-                text, links = self._process_formatting_inline(line[2:])
+                text, links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
                 log.write(f"  • {text}")
                 offset = 4
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
@@ -460,9 +494,11 @@ class MarkdownViewer(Static):
             elif re.match(r"^\d+\. ", line):
                 match = re.match(r"^(\d+)\. (.*)", line)
                 if match:
-                    text, links = self._process_formatting_inline(match.group(2))
-                    log.write(f"  {match.group(1)}. {text}")
-                    offset = len(f"  {match.group(1)}. ")
+                    num = match.group(1)
+                    prefix_len = len(num) + 2  # "N. "
+                    text, links = self._process_formatting_inline(self._apply_highlights_range(match.group(2), line_idx, prefix_len))
+                    log.write(f"  {num}. {text}")
+                    offset = len(f"  {num}. ")
                     link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
                                   "target": l["target"], "text": l["text"]} for l in links] if links else None
                     self._tag_lines.append(None)
@@ -470,7 +506,7 @@ class MarkdownViewer(Static):
                     self._link_lines.append(link_data)
             # Цитаты
             elif line.startswith("> "):
-                text, links = self._process_formatting_inline(line[2:])
+                text, links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
                 log.write(f"[italic yellow]  {text}[/italic yellow]")
                 offset = 2
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
@@ -487,22 +523,25 @@ class MarkdownViewer(Static):
                 tags_in_line = re.findall(r"#(\w+)", line)
                 parts = re.split(r"(#\w+)", line)
                 formatted = ""
+                offset = 0
                 for part in parts:
                     if re.match(r"#\w+", part):
                         color = tag_colors.get(part[1:], "")
+                        highlighted_part = self._apply_highlights_range(part, line_idx, offset)
                         if color:
-                            formatted += f"[bold {color}]{part}[/bold {color}]"
+                            formatted += f"[bold {color}]{highlighted_part}[/bold {color}]"
                         else:
-                            formatted += f"[bold cyan]{part}[/bold cyan]"
+                            formatted += f"[bold cyan]{highlighted_part}[/bold cyan]"
                     else:
-                        formatted += part
+                        formatted += self._apply_highlights_range(part, line_idx, offset)
+                    offset += len(part)
                 log.write(formatted)
                 self._tag_lines.append((tags_in_line, line))
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
             # Inline-форматирование
             elif any(m in line for m in ("**", "__", "~~", "*", "_[", "](")):
-                formatted, links = self._process_formatting_inline(line)
+                formatted, links = self._process_formatting_inline(self._apply_highlights_range(line, line_idx, 0))
                 log.write(formatted)
                 link_data = [{"start": l["start"], "end": l["end"],
                               "target": l["target"], "text": l["text"]} for l in links] if links else None
@@ -517,14 +556,45 @@ class MarkdownViewer(Static):
                 self._link_lines.append(None)
             # Обычный текст
             else:
-                log.write(line)
+                log.write(self._apply_highlights_range(line, line_idx, 0))
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
 
-    def _render_table(self, log, table) -> None:
+        if self._current_match_line is not None:
+            try:
+                log.scroll_to(0, max(0, self._current_match_line - 2))
+            except Exception:
+                pass
+
+    def _render_table(self, log, table, lines, start_idx) -> None:
         """Отрендерить MarkdownTable в RichLog через rich.table.Table."""
+        from rich.markup import escape as rich_escape
         from rich.text import Text
+
+        def _cell_offset(line: str, cell_index: int, value: str) -> int:
+            parts = line.split("|")
+            if cell_index + 1 >= len(parts):
+                return 0
+            raw = parts[cell_index + 1]
+            leading = len(raw) - len(raw.lstrip())
+            pos = line.find(raw)
+            return max(pos + leading, 0)
+
+        def _source_indices() -> List[int]:
+            indices: List[int] = []
+            i = start_idx
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells_raw = [c.strip() for c in lines[i].strip()[1:].split("|")]
+                while cells_raw and cells_raw[-1] == "":
+                    cells_raw = cells_raw[:-1]
+                if not (
+                    all(re.match(r"^\s*:?-+:?\s*$", c) for c in cells_raw if c.strip() != "")
+                    and any(c.strip() for c in cells_raw)
+                ):
+                    indices.append(i)
+                i += 1
+            return indices
 
         rich_table = Table(
             show_header=table.has_header,
@@ -533,26 +603,34 @@ class MarkdownViewer(Static):
             pad_edge=False,
         )
         num_cols = table.num_cols
+        src_indices = _source_indices()
 
+        # Заголовок
         header_row = table.rows[0] if table.has_header and table.rows else None
         for c in range(num_cols):
             header = header_row[c].value if header_row and c < len(header_row) else ""
-            rich_table.add_column(header)
+            offset = 0
+            if header_row is not None and src_indices:
+                header_line = lines[src_indices[0]]
+                offset = _cell_offset(header_line, c, header)
+            highlighted_header = self._apply_highlights_range(rich_escape(header), src_indices[0] if src_indices else 0, offset)
+            rich_table.add_column(Text.from_markup(highlighted_header))
 
         start = 1 if table.has_header else 0
         for r_idx in range(start, len(table.rows)):
             row = table.rows[r_idx]
+            source_idx = src_indices[r_idx] if r_idx < len(src_indices) else 0
             cells = []
             for c_idx, cell in enumerate(row):
-                text = cell.value
+                offset = 0
+                if source_idx < len(lines):
+                    offset = _cell_offset(lines[source_idx], c_idx, cell.value)
+                display_value = rich_escape(cell.value)
+                highlighted = self._apply_highlights_range(display_value, source_idx, offset)
                 if cell.computed:
-                    cells.append(Text(text, style="italic cyan"))
+                    cells.append(Text.from_markup(highlighted, style="italic cyan"))
                 else:
-                    formatted, _ = self._process_formatting_inline(text)
-                    if "[" in formatted and "]" in formatted:
-                        cells.append(Text.from_markup(formatted))
-                    else:
-                        cells.append(formatted)
+                    cells.append(Text.from_markup(highlighted))
             while len(cells) < num_cols:
                 cells.append("")
             rich_table.add_row(*cells)
@@ -599,6 +677,53 @@ class MarkdownViewer(Static):
         # _курсив_
         line = re.sub(r"_(.+?)_", r"[italic]\1[/italic]", line)
         return line, links
+
+    def _find_highlights(
+        self,
+        lines: List[str],
+        terms: List[str],
+        current_idx: int,
+    ) -> Dict[int, List[Tuple[int, int, bool]]]:
+        """Найти позиции терминов для каждой строки и отметить текущее совпадение."""
+        if not terms:
+            return {}
+        # Сначала длинные термины, чтобы частичные совпадения не блокировали длинные
+        escaped = [re.escape(t) for t in sorted(terms, key=len, reverse=True)]
+        pattern = re.compile("|".join(escaped), re.IGNORECASE)
+        highlights: Dict[int, List[Tuple[int, int, bool]]] = {}
+        idx = 0
+        for lnum, line in enumerate(lines):
+            hl = []
+            for match in pattern.finditer(line):
+                hl.append((match.start(), match.end(), idx == current_idx))
+                idx += 1
+            if hl:
+                highlights[lnum] = hl
+        return highlights
+
+    def _apply_highlights_range(
+        self, text: str, line_idx: int, offset: int
+    ) -> str:
+        """Подсветить только часть строки, начинающуюся с offset."""
+        hl_all = sorted(self._line_highlights.get(line_idx, []))
+        if not hl_all:
+            return text
+        parts = []
+        pos = 0
+        text_end = offset + len(text)
+        for start, end, is_current in hl_all:
+            if end <= offset:
+                continue
+            if start >= text_end:
+                break
+            s = max(start, offset) - offset
+            e = min(end, text_end) - offset
+            parts.append(text[pos:s])
+            style = "bold #ffffff on #ff3333" if is_current else "bold #000000 on #ffcc00"
+            parts.append(f"[{style}]{text[s:e]}[/{style}]")
+            pos = e
+        parts.append(text[pos:])
+        return "".join(parts)
 
     def _render_query_block(self, log: "ViewerLog", query_text: str) -> int:
         """Выполнить псевдо-SQL запрос и отрендерить результат таблицей.
@@ -1284,6 +1409,139 @@ class LinkGraphTree(Tree):
             self.post_message(self.TagSelected(data["value"]))
 
 
+class LeftRibbon(Vertical):
+    """Самая левая панель-ленточка с кнопками переключения режимов боковой панели."""
+
+    class ModeChanged(Message):
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+            super().__init__()
+
+    def compose(self) -> ComposeResult:
+        files_btn = ToolButton("📁", id="files-mode-btn", classes="ribbon-btn active")
+        files_btn.tooltip = _("Files")
+        search_btn = ToolButton("🔍", id="search-mode-btn", classes="ribbon-btn")
+        search_btn.tooltip = _("Search")
+        yield files_btn
+        yield search_btn
+
+    def set_active(self, mode: str) -> None:
+        for btn_id, m in (("files-mode-btn", "files"), ("search-mode-btn", "search")):
+            try:
+                btn = self.query_one(f"#{btn_id}", ToolButton)
+            except Exception:
+                continue
+            if m == mode:
+                btn.add_class("active")
+            else:
+                btn.remove_class("active")
+
+    def on_tool_button_pressed(self, event: ToolButton.Pressed) -> None:
+        mode = "files" if event.button_id == "files-mode-btn" else "search"
+        self.set_active(mode)
+        self.post_message(self.ModeChanged(mode))
+
+
+class SearchResultsTree(Tree):
+    """Дерево результатов полнотекстового поиска."""
+
+    class FileSelected(Message):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            super().__init__()
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if data and data.get("type") == "note":
+            self.post_message(self.FileSelected(data["value"]))
+
+
+class SearchView(Vertical):
+    """Панель полнотекстового поиска (вместо дерева файлов)."""
+
+    class FileSelected(Message):
+        def __init__(self, path: Path, match_index: int = 0) -> None:
+            self.path = path
+            self.match_index = match_index
+            super().__init__()
+
+    class PrevMatch(Message):
+        pass
+
+    class NextMatch(Message):
+        pass
+
+    class Cleared(Message):
+        pass
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="search-input-row"):
+            inp = Input(placeholder=_("Search notes"), id="search-input")
+            inp.tooltip = _("Full-text search")
+            yield inp
+            clear_btn = ToolButton("✕", id="clear-search-btn", classes="search-clear-btn")
+            clear_btn.tooltip = _("Clear")
+            yield clear_btn
+        yield Label("", id="search-status")
+        yield SearchResultsTree(_("Search results"), id="search-results-tree")
+        with Horizontal(id="search-nav"):
+            prev_btn = ToolButton("▲", id="search-prev-btn", classes="search-nav-btn")
+            prev_btn.tooltip = _("Previous result")
+            yield prev_btn
+            next_btn = ToolButton("▼", id="search-next-btn", classes="search-nav-btn")
+            next_btn.tooltip = _("Next result")
+            yield next_btn
+            yield Label("", id="search-match-status")
+
+    def set_results(self, results: List[Dict[str, Any]], total_found: int) -> None:
+        """Заполнить дерево результатов."""
+        tree = self.query_one("#search-results-tree", SearchResultsTree)
+        tree.clear()
+        tree.show_root = True
+        tree.root.set_label(_("Search results"))
+        tree.root.expand()
+        if not results:
+            tree.root.add(_("No results"))
+        else:
+            for r in results:
+                node = tree.root.add(f"📄 {r['path'].name}", data={"type": "note", "value": r["path"]})
+                if r.get("snippet"):
+                    node.add_leaf(f"[dim]{escape(r['snippet'])}[/dim]")
+        status = self.query_one("#search-status", Label)
+        status.update(f"{total_found} results")
+
+    def update_match_status(self, current: int, total: int) -> None:
+        label = self.query_one("#search-match-status", Label)
+        if total <= 0:
+            label.update("")
+        else:
+            label.update(_("Result {current} / {total}", current=current + 1, total=total))
+
+    def get_query(self) -> str:
+        try:
+            return self.query_one("#search-input", Input).value
+        except Exception:
+            return ""
+
+    def set_query(self, value: str) -> None:
+        try:
+            self.query_one("#search-input", Input).value = value
+        except Exception:
+            pass
+
+    def on_search_results_tree_file_selected(self, event: SearchResultsTree.FileSelected) -> None:
+        self.post_message(self.FileSelected(event.path))
+
+    def on_tool_button_pressed(self, event: ToolButton.Pressed) -> None:
+        if event.button_id == "clear-search-btn":
+            self.query_one("#search-input", Input).value = ""
+            self.post_message(self.Cleared())
+        elif event.button_id == "search-prev-btn":
+            self.post_message(self.PrevMatch())
+        elif event.button_id == "search-next-btn":
+            self.post_message(self.NextMatch())
+
+
 class TagSearchModal(ModalScreen):
     """Модальное окно поиска по тегам."""
 
@@ -1415,15 +1673,18 @@ class TextPromptModal(ModalScreen[Optional[str]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, title: str, placeholder: str = "", **kwargs) -> None:
+    def __init__(self, title: str, placeholder: str = "", initial: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
         self._title = title
         self._placeholder = placeholder
+        self._initial = initial
 
     def compose(self) -> ComposeResult:
+        input_widget = Input(placeholder=self._placeholder, id="prompt-input")
+        input_widget.value = self._initial
         yield Container(
             Label(f"[bold]{self._title}[/bold]"),
-            Input(placeholder=self._placeholder, id="prompt-input"),
+            input_widget,
             Label(f"[dim]{_('Enter — confirm, Escape — cancel')}[/dim]"),
             id="prompt-container",
         )
@@ -1436,6 +1697,36 @@ class TextPromptModal(ModalScreen[Optional[str]]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """Модальное окно подтверждения да/нет."""
+
+    BINDINGS = [
+        Binding("enter", "confirm", "Confirm"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("y", "confirm", "Confirm", show=False),
+        Binding("n", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, title: str, message: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._title = title
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Label(f"[bold]{self._title}[/bold]"),
+            Label(self._message),
+            Label(f"[dim]{_('Enter — confirm, Escape — cancel')}[/dim]"),
+            id="confirm-container",
+        )
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class TemplateSelectModal(ModalScreen[Optional[str]]):
@@ -1539,8 +1830,14 @@ class MarkdownEditorApp(App):
         Binding("ctrl+t", "search_tags", "Tags"),
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+b", "toggle_sidebar", "Sidebar"),
+        Binding("ctrl+f", "toggle_search_mode", "Search"),
+        Binding("f3", "search_next", "Next result"),
+        Binding("shift+f3", "search_prev", "Prev result"),
+        Binding("ctrl+shift+f", "toggle_favorite", "Favorite"),
         Binding("ctrl+l", "toggle_theme", "Theme"),
-        Binding("ctrl+f", "toggle_favorite", "Favorite"),
+        Binding("ctrl+question", "help", "Help"),
+        Binding("d", "delete_selected", "Delete", show=False),
+        Binding("r", "rename_selected", "Rename", show=False),
         Binding("backspace", "go_back", "Back", show=False),
     ]
 
@@ -1551,13 +1848,43 @@ class MarkdownEditorApp(App):
 
     #main-container {
         layout: grid;
-        grid-size: 3 1;
-        grid-columns: 30 1 1fr;
+        grid-size: 4 1;
+        grid-columns: 3 30 1 1fr;
         height: 1fr;
+    }
+
+    #left-ribbon {
+        width: 3;
+        height: 1fr;
+        background: $surface-darken-1;
+        border-right: solid $primary-darken-2;
+        padding: 1 0;
+    }
+
+    .ribbon-btn {
+        width: 3;
+        height: 1;
+        margin: 0 0 1 0;
+        padding: 0;
+        text-align: center;
+        background: transparent;
+        color: $text;
+    }
+
+    .ribbon-btn:hover {
+        background: $primary-darken-2;
+        color: $text;
+    }
+
+    .ribbon-btn.active {
+        background: $primary;
+        color: $text;
+        text-style: bold;
     }
 
     #sidebar {
         border: solid $primary-darken-2;
+        border-left: none;
         padding: 0;
         background: $surface;
     }
@@ -1622,6 +1949,105 @@ class MarkdownEditorApp(App):
         height: auto;
         max-height: 9;
         padding: 0;
+    }
+
+    #search-view {
+        height: 1fr;
+        padding: 0;
+        background: $surface;
+        display: none;
+    }
+
+    #search-input-row {
+        height: auto;
+        padding: 1;
+        background: $surface;
+    }
+
+    #search-input {
+        width: 1fr;
+        height: auto;
+        min-height: 3;
+    }
+
+    .search-clear-btn {
+        width: 3;
+        height: auto;
+        min-height: 3;
+        margin-left: 1;
+        padding: 0;
+        text-align: center;
+        background: $primary-darken-1;
+        color: $text;
+    }
+
+    .search-clear-btn:hover {
+        background: $error;
+        color: $text;
+    }
+
+    #search-status {
+        height: 1;
+        padding: 0 1;
+        color: $text;
+        text-style: dim;
+    }
+
+    #search-results-tree {
+        height: 1fr;
+        background: $surface;
+        padding: 0 0 0 1;
+    }
+
+    #search-results-tree Tree > .tree--directory {
+        text-style: bold;
+    }
+
+    #search-nav {
+        height: auto;
+        padding: 0 1 1 1;
+        background: $surface;
+        border-top: solid $primary-darken-2;
+    }
+
+    .search-nav-btn {
+        width: 5;
+        height: 1;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        text-align: center;
+        background: $primary-darken-1;
+        color: $text;
+    }
+
+    .search-nav-btn:hover {
+        background: $primary;
+        color: $text;
+    }
+
+    #search-match-status {
+        width: 1fr;
+        height: 1;
+        content-align: right middle;
+        color: $text;
+    }
+
+    .search-highlight {
+        background: #ffcc00;
+        color: #000000;
+        text-style: bold;
+    }
+
+    .search-current {
+        background: #ff3333;
+        color: #ffffff;
+        text-style: bold reverse;
+    }
+
+    .search-current-warning {
+        background: #ff5f1f;
+        color: #000000;
+        text-style: bold reverse;
     }
 
     #content-area {
@@ -1941,6 +2367,7 @@ class MarkdownEditorApp(App):
         self.current_file: Optional[Path] = None
         self.is_edit_mode = False
         self.sidebar_visible = True
+        self.sidebar_mode = "files"  # "files" | "search"
         self.tag_cache: Dict[str, List[Path]] = {}
         self.tag_colors: Dict[str, str] = {}
         self.note_links: Dict[Path, Set[Path]] = {}
@@ -1949,8 +2376,16 @@ class MarkdownEditorApp(App):
         self._file_history: List[Path] = []
         self._return_to_graph: bool = False
         self.tag_index = TagIndex(self.file_system.root_path)
+        self.fts_index = FullTextIndex(self.file_system.root_path)
         self.query_engine = QueryEngine(self.file_system, self.parser, self.tag_index)
         self._rebuild_tag_cache()
+
+        # Полнотекстовый поиск
+        self._search_query: str = ""
+        self._search_terms: List[str] = []
+        self._search_matches: List[Tuple[int, int, int]] = []
+        self._current_match_index: int = 0
+        self._search_results: List[Dict[str, Any]] = []
 
     def _rebuild_tag_cache(self):
         """Обновить SQLite-индекс и перезагрузить кэш тегов, цветов и связей."""
@@ -1958,6 +2393,7 @@ class MarkdownEditorApp(App):
         # Связи перестраиваем ДО тегов, чтобы использовать старые mtime
         self.tag_index.rebuild_note_links(md_files, self.parser)
         self.tag_index.rebuild(md_files, self.parser)
+        self.fts_index.rebuild(md_files)
         self.tag_cache = self.tag_index.get_tag_files()
         self.tag_colors = self.tag_index.get_tag_colors()
         self.note_links = self.tag_index.get_note_links()
@@ -1985,6 +2421,8 @@ class MarkdownEditorApp(App):
         yield Header()
 
         with Horizontal(id="main-container"):
+            yield LeftRibbon(id="left-ribbon")
+
             with Vertical(id="sidebar"):
                 with Horizontal(id="sidebar-header"):
                     yield Label(f"[bold]{self.file_system.root_path.name}[/bold]", id="sidebar-label")
@@ -2007,6 +2445,7 @@ class MarkdownEditorApp(App):
                 with Vertical(id="tag-cloud-container"):
                     yield Label(f"[bold]{_('Tags')}[/bold]")
                     yield TagCloud(id="tag-cloud")
+                yield SearchView(id="search-view")
 
             yield VerticalSplitter(id="splitter")
 
@@ -2014,7 +2453,7 @@ class MarkdownEditorApp(App):
                 yield MarkdownViewer(id="viewer")
                 with Vertical(id="editor-container"):
                     yield EditorToolbar(id="editor-toolbar")
-                    yield TextArea(id="editor", language="markdown")
+                    yield EditorTextArea(id="editor", language="markdown")
                 yield FormView(id="form-view")
                 yield BaseView(id="base-view")
                 yield LinkGraphTree(id="graph-view")
@@ -2031,16 +2470,157 @@ class MarkdownEditorApp(App):
 
         sidebar_width = self.config.display.get("sidebar_width", 30)
         main_container = self.query_one("#main-container")
-        main_container.styles.grid_columns = (sidebar_width, 1, "1fr")
+        main_container.styles.grid_columns = (3, sidebar_width, 1, "1fr")
 
         editor = self.query_one("#editor", TextArea)
         self.query_one("#editor-container").display = False
         self.query_one("#form-view", FormView).display = False
         self.query_one("#base-view", BaseView).display = False
         self.query_one("#graph-view", LinkGraphTree).display = False
+        self.query_one("#search-view", SearchView).display = False
+        self._set_sidebar_mode("files")
         self._register_markdown_highlights(editor)
         self._apply_editor_syntax_theme(editor)
         self._update_status()
+
+    def _set_sidebar_mode(self, mode: str) -> None:
+        """Переключить боковую панель: дерево файлов или поиск."""
+        self.sidebar_mode = mode
+        ribbon = self.query_one("#left-ribbon", LeftRibbon)
+        ribbon.set_active(mode)
+        file_tree = self.query_one("#file-tree", FileTree)
+        tag_cloud = self.query_one("#tag-cloud-container", Vertical)
+        search_view = self.query_one("#search-view", SearchView)
+        if mode == "files":
+            file_tree.display = True
+            tag_cloud.display = True
+            search_view.display = False
+        else:
+            file_tree.display = False
+            tag_cloud.display = False
+            search_view.display = True
+            def _focus_input() -> None:
+                try:
+                    inp = search_view.query_one("#search-input", Input)
+                    self.set_focus(inp)
+                except Exception:
+                    pass
+            self.call_after_refresh(_focus_input)
+
+    def on_left_ribbon_mode_changed(self, event: LeftRibbon.ModeChanged) -> None:
+        """Переключение режима левой панели."""
+        self._set_sidebar_mode(event.mode)
+
+    def action_toggle_search_mode(self) -> None:
+        """Переключить режим боковой панели (файлы / поиск)."""
+        new_mode = "search" if self.sidebar_mode == "files" else "files"
+        self._set_sidebar_mode(new_mode)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Запускаем поиск по Enter в строке поиска."""
+        if event.input.id == "search-input":
+            self._run_search(event.value)
+
+    def _run_search(self, query: str) -> None:
+        """Выполнить полнотекстовый поиск и обновить панель результатов."""
+        self._search_query = query.strip()
+        self._search_terms = self.fts_index.extract_terms(self._search_query) if self._search_query else []
+        self._current_match_index = 0
+        self._search_matches = []
+        search_view = self.query_one("#search-view", SearchView)
+        if not self._search_query:
+            self._search_results = []
+            search_view.set_results([], 0)
+            search_view.update_match_status(0, 0)
+            if self.current_file:
+                self._load_file()
+            return
+        results = self.fts_index.search(self._search_query, limit=200)
+        self._search_results = results
+        search_view.set_results(results, len(results))
+        if results:
+            self._set_sidebar_mode("search")
+        if self.current_file:
+            self._load_file()
+        else:
+            search_view.update_match_status(0, 0)
+
+    def _compute_search_matches(self, content: str) -> None:
+        """Построить список совпадений для текущего содержимого."""
+        self._search_matches = []
+        if not self._search_terms or not content:
+            return
+        escaped = [re.escape(t) for t in sorted(self._search_terms, key=len, reverse=True)]
+        pattern = re.compile("|".join(escaped), re.IGNORECASE)
+        for lnum, line in enumerate(content.split("\n")):
+            for match in pattern.finditer(line):
+                self._search_matches.append((lnum, match.start(), match.end()))
+
+    def _apply_current_match(self) -> None:
+        """Подсветить/выделить текущее совпадение в просмотре или редакторе."""
+        search_view = self.query_one("#search-view", SearchView)
+        if not self._search_matches:
+            search_view.update_match_status(0, 0)
+            return
+        idx = self._current_match_index % len(self._search_matches)
+        line, start, end = self._search_matches[idx]
+        search_view.update_match_status(idx, len(self._search_matches))
+
+        viewer = self.query_one("#viewer", MarkdownViewer)
+        if viewer.display and self.current_file:
+            content = self.file_system.read_file(self.current_file)
+            viewer.update_content(content, self._search_terms, idx)
+            return
+
+        editor = self.query_one("#editor", TextArea)
+        if editor.display:
+            from textual.widgets.text_area import Selection
+            editor.selection = Selection((line, start), (line, end))
+            editor.scroll_cursor_visible()
+            editor.focus()
+
+    def _search_next(self) -> None:
+        if not self._search_matches:
+            return
+        self._current_match_index = (self._current_match_index + 1) % len(self._search_matches)
+        self._apply_current_match()
+
+    def _search_prev(self) -> None:
+        if not self._search_matches:
+            return
+        self._current_match_index = (self._current_match_index - 1) % len(self._search_matches)
+        self._apply_current_match()
+
+    def action_search_next(self) -> None:
+        """Следующее совпадение (F3)."""
+        self._search_next()
+
+    def action_search_prev(self) -> None:
+        """Предыдущее совпадение (Shift+F3)."""
+        self._search_prev()
+
+    def on_search_view_file_selected(self, event: SearchView.FileSelected) -> None:
+        """Открыть файл из результатов поиска."""
+        self._return_to_graph = False
+        self._current_match_index = event.match_index
+        self._navigate_to(event.path)
+
+    def on_search_view_cleared(self, _: SearchView.Cleared) -> None:
+        """Очистить поиск."""
+        self._search_query = ""
+        self._search_terms = []
+        self._search_matches = []
+        self._current_match_index = 0
+        self.query_one("#search-view", SearchView).set_results([], 0)
+        self.query_one("#search-view", SearchView).update_match_status(0, 0)
+        if self.current_file:
+            self._load_file()
+
+    def on_search_view_prev_match(self, _: SearchView.PrevMatch) -> None:
+        self._search_prev()
+
+    def on_search_view_next_match(self, _: SearchView.NextMatch) -> None:
+        self._search_next()
 
     def _apply_editor_syntax_theme(self, editor: TextArea) -> None:
         """Установить синтаксическую тему редактора под текущую тему приложения."""
@@ -2068,7 +2648,10 @@ class MarkdownEditorApp(App):
         # Перерисовать открытый файл с новой темой кода
         if self.current_file and not self.is_edit_mode:
             viewer = self.query_one("#viewer", MarkdownViewer)
-            viewer.update_content(self.file_system.read_file(self.current_file))
+            content = self.file_system.read_file(self.current_file)
+            self._compute_search_matches(content)
+            viewer.update_content(content, self._search_terms, self._current_match_index)
+            self._update_search_match_status()
 
     def _register_markdown_highlights(self, editor: TextArea) -> None:
         """Кастомный highlight-запрос: код в блоках окрашивается как строки."""
@@ -2183,6 +2766,8 @@ class MarkdownEditorApp(App):
             return
 
         content = self.file_system.read_file(self.current_file)
+        self._compute_search_matches(content)
+
         viewer = self.query_one("#viewer", MarkdownViewer)
         editor = self.query_one("#editor", TextArea)
         editor_container = self.query_one("#editor-container")
@@ -2198,6 +2783,7 @@ class MarkdownEditorApp(App):
             base.display   = False
             self._original_content = content
             editor.load_text(content)
+            self._apply_editor_search_match()
         else:
             form_def = parse_form_definition(content)
             base_def = parse_base_definition(content)
@@ -2221,11 +2807,34 @@ class MarkdownEditorApp(App):
                 editor_container.display = False
                 form.display   = False
                 base.display   = False
-                viewer.update_content(content)
+                viewer.update_content(content, self._search_terms, self._current_match_index)
                 viewer.focus()
 
         self.title = f"Impactite — {self.current_file.name}"
         self._update_status()
+        self._update_search_match_status()
+
+    def _apply_editor_search_match(self) -> None:
+        """Выделить текущее совпадение в редакторе."""
+        if not self._search_matches:
+            return
+        idx = self._current_match_index % len(self._search_matches)
+        line, start, end = self._search_matches[idx]
+        editor = self.query_one("#editor", TextArea)
+        from textual.widgets.text_area import Selection
+        editor.selection = Selection((line, start), (line, end))
+        editor.scroll_cursor_visible()
+
+    def _update_search_match_status(self) -> None:
+        """Обновить счётчик совпадений в панели поиска."""
+        search_view = self.query_one("#search-view", SearchView)
+        if self._search_matches:
+            search_view.update_match_status(
+                self._current_match_index % len(self._search_matches),
+                len(self._search_matches),
+            )
+        else:
+            search_view.update_match_status(0, 0)
 
     def action_toggle_edit(self):
         """Переключить режим редактирования."""
@@ -2261,7 +2870,9 @@ class MarkdownEditorApp(App):
             self._update_tag_cloud()
             if not self.is_edit_mode:
                 viewer = self.query_one("#viewer", MarkdownViewer)
-                viewer.update_content(content)
+                self._compute_search_matches(content)
+                viewer.update_content(content, self._search_terms, self._current_match_index)
+                self._update_search_match_status()
         else:
             self.notify(_("Save error"), severity="error")
 
@@ -2333,7 +2944,9 @@ class MarkdownEditorApp(App):
         new_content = "\n".join(lines)
         if self.file_system.write_file(self.current_file, new_content):
             viewer = self.query_one("#viewer", MarkdownViewer)
-            viewer.update_content(new_content)
+            self._compute_search_matches(new_content)
+            viewer.update_content(new_content, self._search_terms, self._current_match_index)
+            self._update_search_match_status()
             self._rebuild_tag_cache()
             self._update_tag_cloud()
         else:
@@ -2498,6 +3111,7 @@ class MarkdownEditorApp(App):
                     self.notify(_("Note creation error"), severity="error")
                     return
                 created = True
+                self.fts_index.index_file(target)
                 self._rebuild_tag_cache()
                 self._update_tag_cloud()
             self._refresh_file_tree()
@@ -2530,6 +3144,7 @@ class MarkdownEditorApp(App):
             if not self.file_system.write_file(target, frontmatter):
                 self.notify(_("Note creation error"), severity="error")
                 return
+            self.fts_index.index_file(target)
             self._rebuild_tag_cache()
             self._update_tag_cloud()
 
@@ -2592,6 +3207,7 @@ class MarkdownEditorApp(App):
                     self.notify(_("Note creation error"), severity="error")
                     return
                 created = True
+                self.fts_index.index_file(target)
                 self._rebuild_tag_cache()
                 self._update_tag_cloud()
             self._refresh_file_tree()
@@ -2614,6 +3230,110 @@ class MarkdownEditorApp(App):
         self._rebuild_tag_cache()
         self._update_tag_cloud()
         self.notify(_("File list refreshed"), severity="information")
+
+    def _selected_path(self) -> Optional[Path]:
+        """Вернуть путь выбранного узла в дереве файлов (файл или каталог)."""
+        tree = self.query_one("#file-tree", FileTree)
+        node = tree.cursor_node
+        if node is None:
+            return None
+        node_id = id(node)
+        if node_id in tree.file_nodes:
+            return tree.file_nodes[node_id]
+        if node_id in tree.dir_nodes:
+            return tree.dir_nodes[node_id]
+        return None
+
+    def action_delete_selected(self) -> None:
+        """Удалить выбранный файл или каталог."""
+        path = self._selected_path()
+        if path is None:
+            return
+        if path == self.file_system.root_path:
+            self.notify(_("Cannot delete root directory"), severity="warning")
+            return
+
+        def confirm(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            try:
+                if path.is_dir():
+                    import shutil
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except Exception as e:
+                self.notify(_("File delete error: {error}", error=e), severity="error")
+                return
+            self.fts_index.remove_file(path)
+            if self.current_file and (self.current_file == path or path in self.current_file.parents):
+                self.current_file = None
+                self._original_content = ""
+                self._compute_search_matches("")
+                self._clear_main_area()
+            self._rebuild_tag_cache()
+            self._update_tag_cloud()
+            self._refresh_file_tree()
+            self.notify(_("File deleted: {name}", name=path.name), severity="information")
+
+        self.push_screen(
+            ConfirmModal(
+                title=_("Confirm deletion"),
+                message=_("Delete {name}?", name=path.name),
+            ),
+            confirm,
+        )
+
+    def action_rename_selected(self) -> None:
+        """Переименовать выбранный файл или каталог."""
+        path = self._selected_path()
+        if path is None:
+            return
+        if path == self.file_system.root_path:
+            self.notify(_("Cannot rename root directory"), severity="warning")
+            return
+
+        def done(name: Optional[str]) -> None:
+            if not name:
+                return
+            new_path = path.parent / name
+            if new_path.exists():
+                self.notify(_("Target already exists"), severity="error")
+                return
+            try:
+                path.rename(new_path)
+            except Exception as e:
+                self.notify(_("Rename error: {error}", error=e), severity="error")
+                return
+            self.fts_index.remove_file(path)
+            if new_path.is_file() and new_path.suffix.lower() == ".md":
+                self.fts_index.index_file(new_path)
+            if self.current_file == path:
+                self.current_file = new_path
+            self._rebuild_tag_cache()
+            self._update_tag_cloud()
+            self._refresh_file_tree()
+            self.notify(_("File renamed to {name}", name=new_path.name), severity="information")
+
+        self.push_screen(
+            TextPromptModal(_("New name"), placeholder=path.name, initial=path.name),
+            done,
+        )
+
+    def _clear_main_area(self) -> None:
+        """Очистить основную область (просмотр / редактор / форма / база / граф)."""
+        viewer = self.query_one("#viewer", MarkdownViewer)
+        editor_container = self.query_one("#editor-container")
+        form = self.query_one("#form-view", FormView)
+        base = self.query_one("#base-view", BaseView)
+        graph = self.query_one("#graph-view", LinkGraphTree)
+        viewer.display = False
+        editor_container.display = False
+        form.display = False
+        base.display = False
+        graph.display = False
+        self.title = "Impactite"
+        self._update_status()
 
     def action_toggle_sidebar(self):
         """Показать/скрыть боковую панель."""
@@ -2671,6 +3391,7 @@ class MarkdownEditorApp(App):
         file_content = f"---\n{fm_str}---\n"
 
         if self.file_system.write_file(filepath, file_content):
+            self.fts_index.index_file(filepath)
             self._rebuild_tag_cache()
             self._update_tag_cloud()
             self._refresh_file_tree()
@@ -2689,6 +3410,7 @@ class MarkdownEditorApp(App):
 
     def on_unmount(self) -> None:
         self.tag_index.close()
+        self.fts_index.close()
 
 
 def main():

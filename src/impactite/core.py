@@ -5,8 +5,9 @@ import colorsys
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple, Union
+from typing import List, Dict, Set, Optional, Tuple, Union, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -1414,6 +1415,245 @@ class QueryEngine:
 def get_available_syntax_themes() -> List[str]:
     """Получить список доступных тем подсветки."""
     return list(get_all_styles())
+
+
+class FullTextIndex:
+    """Полнотекстовый индекс заметок на основе SQLite FTS5.
+
+    Индекс хранится рядом с заметками в файле ``.impactite_fts.db``.
+    Если SQLite собран без FTS5, выполняется fallback на обычный LIKE-скан.
+    """
+
+    _DB_NAME = ".impactite_fts.db"
+
+    def __init__(self, notes_path: Path) -> None:
+        self.notes_dir = notes_path
+        self.db_path = self.notes_dir / self._DB_NAME
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._fts5_available = self._detect_fts5()
+        self._ensure_schema()
+        self._migrate_schema()
+
+    def close(self) -> None:
+        """Закрыть соединение с индексом."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def _detect_fts5(self) -> bool:
+        """Проверить, что SQLite поддерживает FTS5."""
+        try:
+            self._conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_test USING fts5(x)")
+            self._conn.execute("DROP TABLE IF EXISTS _fts_test")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def _ensure_schema(self) -> None:
+        """Создать нужные таблицы."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                path TEXT PRIMARY KEY,
+                filename TEXT,
+                content TEXT,
+                mtime REAL
+            )
+        """)
+        if self._fts5_available:
+            self._conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                    path UNINDEXED,
+                    filename,
+                    content,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                )
+            """)
+        self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Пересоздать таблицы, если схема устарела."""
+        try:
+            cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(files)")}
+        except sqlite3.OperationalError:
+            cols = set()
+        required = {"path", "filename", "content", "mtime"}
+        if not required.issubset(cols):
+            self._conn.execute("DROP TABLE IF EXISTS files")
+            if self._fts5_available:
+                try:
+                    self._conn.execute("DROP TABLE IF EXISTS files_fts")
+                except sqlite3.OperationalError:
+                    pass
+            self._ensure_schema()
+
+    def rebuild(self, files: List[Path]) -> None:
+        """Инкрементально обновить индекс."""
+        current = {row["path"]: row["mtime"] for row in self._conn.execute("SELECT path, mtime FROM files")}
+        file_set = {str(f): f for f in files}
+
+        to_delete = set(current.keys()) - set(file_set.keys())
+        to_update: List[Path] = []
+        for path_str, path in file_set.items():
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            old_mtime = current.get(path_str)
+            if old_mtime is None or abs(old_mtime - mtime) > 0.001:
+                to_update.append(path)
+
+        if not to_delete and not to_update:
+            return
+
+        with self._conn:
+            for path_str in to_delete:
+                self._conn.execute("DELETE FROM files WHERE path = ?", (path_str,))
+                if self._fts5_available:
+                    self._conn.execute("DELETE FROM files_fts WHERE path = ?", (path_str,))
+
+            for path in to_update:
+                self._upsert_file(path)
+
+    def index_file(self, path: Path) -> None:
+        """Добавить или обновить один файл в индексе."""
+        self._upsert_file(path)
+
+    def index_files(self, files: List[Path]) -> None:
+        """Добавить или обновить несколько файлов."""
+        for path in files:
+            self._upsert_file(path)
+
+    def remove_file(self, path: Path) -> None:
+        """Удалить файл из индекса."""
+        self._remove_file(path)
+
+    def _remove_file(self, path: Path) -> None:
+        path_str = str(path)
+        self._conn.execute("DELETE FROM files WHERE path = ?", (path_str,))
+        if self._fts5_available:
+            self._conn.execute("DELETE FROM files_fts WHERE path = ?", (path_str,))
+        self._conn.commit()
+
+    def _upsert_file(self, path: Path) -> None:
+        """Проиндексировать один файл."""
+        try:
+            content = path.read_text(encoding="utf-8")
+            mtime = path.stat().st_mtime
+        except Exception:
+            return
+        path_str = str(path)
+        filename = path.name
+        self._conn.execute(
+            "INSERT OR REPLACE INTO files (path, filename, content, mtime) VALUES (?, ?, ?, ?)",
+            (path_str, filename, content, mtime),
+        )
+        if self._fts5_available:
+            self._conn.execute("DELETE FROM files_fts WHERE path = ?", (path_str,))
+            self._conn.execute(
+                "INSERT INTO files_fts (path, filename, content) VALUES (?, ?, ?)",
+                (path_str, filename, content),
+            )
+
+    def search(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Выполнить поиск и вернуть список результатов.
+
+        Каждый результат — dict с ключами ``path`` (Path) и ``snippet`` (str).
+        """
+        query = query.strip()
+        if not query:
+            return []
+
+        terms = self.extract_terms(query)
+        if not terms:
+            return []
+
+        if self._fts5_available:
+            return self._search_fts(query, limit)
+        return self._search_like(terms, limit)
+
+    def _search_fts(self, query: str, limit: Optional[int]) -> List[Dict[str, Any]]:
+        match_expr = self._build_match_expr(query)
+        sql = """
+            SELECT path, snippet(files_fts, 2, '<', '>', '...', 40) AS snippet
+            FROM files_fts
+            WHERE files_fts MATCH ?
+            ORDER BY bm25(files_fts)
+        """
+        params: List[Any] = [match_expr]
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [{"path": Path(row["path"]), "snippet": row["snippet"] or ""} for row in rows]
+
+    def _search_like(self, terms: List[str], limit: Optional[int]) -> List[Dict[str, Any]]:
+        # Fallback: LIKE по каждому термину; регистронезависимо
+        like_pattern = f"%{terms[0].lower()}%"
+        sql = "SELECT path, filename FROM files WHERE lower(content) LIKE ?"
+        params = [like_pattern]
+        for term in terms[1:]:
+            sql += " AND lower(content) LIKE ?"
+            params.append(f"%{term.lower()}%")
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        result = []
+        for row in rows:
+            snippet = self._make_snippet(Path(row["path"]), terms)
+            result.append({"path": Path(row["path"]), "snippet": snippet})
+        return result
+
+    def _make_snippet(self, path: Path, terms: List[str]) -> str:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        low = content.lower()
+        best_pos = -1
+        for term in terms:
+            pos = low.find(term)
+            if pos != -1 and (best_pos == -1 or pos < best_pos):
+                best_pos = pos
+        if best_pos == -1:
+            return path.name
+        start = max(0, best_pos - 30)
+        end = min(len(content), best_pos + 80)
+        snippet = content[start:end].replace("\n", " ")
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(content) else ""
+        return prefix + snippet + suffix
+
+    def _build_match_expr(self, query: str) -> str:
+        """Преобразовать человеческий запрос в FTS MATCH."""
+        # Простая эвристика: слова соединяем через AND, кавычки сохраняем
+        tokens = self._tokenize_query(query)
+        if not tokens:
+            return query
+        return " AND ".join(tokens)
+
+    def _tokenize_query(self, query: str) -> List[str]:
+        """Разбить запрос на токены для MATCH/LIKE.
+
+        Поддерживает фразы в кавычках. Возвращает токены без изменения регистра.
+        """
+        tokens: List[str] = []
+        for match in re.finditer(r'"([^"]+)"|\S+', query):
+            token = match.group(1) if match.group(1) is not None else match.group(0)
+            token = token.strip()
+            if token:
+                tokens.append(token)
+        return tokens
+
+    def extract_terms(self, query: str) -> List[str]:
+        """Вернуть список нормализованных терминов для подсветки совпадений."""
+        return [t.lower() for t in re.findall(r"\w+", query) if t.strip()]
 
 
 if __name__ == "__main__":

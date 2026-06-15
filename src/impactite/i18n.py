@@ -74,6 +74,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Folder creation error": "Ошибка создания каталога",
         "Note created: {name}": "Заметка создана: {name}",
         "Note creation error": "Ошибка создания заметки",
+        # Удаление / переименование
+        "Delete": "Удалить",
+        "Rename": "Переименовать",
+        "Confirm deletion": "Подтвердить удаление",
+        "Delete {name}?": "Удалить {name}?",
+        "File deleted: {name}": "Файл удалён: {name}",
+        "File delete error": "Ошибка удаления файла",
+        "New name": "Новое имя",
+        "Rename error": "Ошибка переименования",
+        "File renamed to {name}": "Файл переименован в {name}",
         # Горячие клавиши (Footer)
         "Quit": "Выход",
         "Edit": "Редактировать",
@@ -103,6 +113,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Link graph": "Граф связей",
         "No data for graph": "Нет данных для графа",
         "File not found: {path}": "Файл не найден: {path}",
+        # Полнотекстовый поиск
+        "Files": "Файлы",
+        "Search": "Поиск",
+        "Search notes": "Искать заметки",
+        "No results": "Нет результатов",
+        "Search results": "Результаты поиска",
+        "Result {current} / {total}": "Результат {current} / {total}",
+        "Previous result": "Предыдущий результат",
+        "Next result": "Следующий результат",
+        "Clear": "Очистить",
     },
     "de": {
         # Виджеты / просмотр
@@ -156,6 +176,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Folder creation error": "Fehler beim Erstellen des Ordners",
         "Note created: {name}": "Notiz erstellt: {name}",
         "Note creation error": "Fehler beim Erstellen der Notiz",
+        # Löschen / Umbenennen
+        "Delete": "Löschen",
+        "Rename": "Umbenennen",
+        "Confirm deletion": "Löschung bestätigen",
+        "Delete {name}?": "{name} löschen?",
+        "File deleted: {name}": "Datei gelöscht: {name}",
+        "File delete error": "Fehler beim Löschen der Datei",
+        "New name": "Neuer Name",
+        "Rename error": "Fehler beim Umbenennen",
+        "File renamed to {name}": "Datei umbenannt in {name}",
         # Горячие клавиши (Footer)
         "Quit": "Beenden",
         "Edit": "Bearbeiten",
@@ -185,6 +215,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Link graph": "Verknüpfungsgraph",
         "No data for graph": "Keine Daten für Graph",
         "File not found: {path}": "Datei nicht gefunden: {path}",
+        # Volltextsuche
+        "Files": "Dateien",
+        "Search": "Suche",
+        "Search notes": "Notizen durchsuchen",
+        "No results": "Keine Ergebnisse",
+        "Search results": "Suchergebnisse",
+        "Result {current} / {total}": "Ergebnis {current} / {total}",
+        "Previous result": "Vorheriges Ergebnis",
+        "Next result": "Nächstes Ergebnis",
+        "Clear": "Löschen",
     },
 }
 
