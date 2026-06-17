@@ -86,6 +86,17 @@ class Config:
         with open(self.config_path, "w", encoding="utf-8") as f:
             f.write(content)
 
+    def get_user_theme(self) -> str:
+        """Вернуть тему, выбранную пользователем, с защитой от некорректного значения."""
+        theme = self.display.get("app_theme", "textual-dark")
+        if not isinstance(theme, str) or not theme.strip():
+            return "textual-dark"
+        return theme.strip()
+
+    def save_user_theme(self, theme: str) -> None:
+        """Сохранить пользовательский выбор темы."""
+        self.save_theme(theme)
+
     def save_display_value(self, key: str, value) -> None:
         """Обновить значение в display-секции конфига, сохранив остальное без изменений."""
         self.display[key] = value
@@ -189,6 +200,68 @@ class Config:
                     config_path=config_path,
                 )
         return cls(config_path=config_path)
+
+
+# Known light/dark theme pairs used by the Ctrl+L toggle.
+_THEME_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("textual-dark", "textual-light"),
+    ("catppuccin-mocha", "catppuccin-latte"),
+    ("rose-pine-moon", "rose-pine-dawn"),
+    ("atom-one-dark", "atom-one-light"),
+)
+
+_LIGHT_THEME_BY_DARK: Dict[str, str] = {pair[0]: pair[1] for pair in _THEME_PAIRS}
+_DARK_THEME_BY_LIGHT: Dict[str, str] = {pair[1]: pair[0] for pair in _THEME_PAIRS}
+
+
+def resolve_theme_variant(user_theme: str, target_light: bool, light_themes: frozenset[str]) -> str:
+    """Return the light or dark variant of user_theme, falling back to a sensible default.
+
+    Args:
+        user_theme: The theme the user has explicitly selected.
+        target_light: True to resolve the light variant, False for the dark variant.
+        light_themes: Set of known light theme names.
+
+    Returns:
+        The counterpart theme name, or ``textual-light`` / ``textual-dark`` as a fallback.
+    """
+    if not isinstance(user_theme, str):
+        return "textual-light" if target_light else "textual-dark"
+    user_theme = user_theme.strip()
+    if not user_theme:
+        return "textual-light" if target_light else "textual-dark"
+
+    if target_light:
+        counterpart = _LIGHT_THEME_BY_DARK.get(user_theme)
+        if counterpart:
+            return counterpart
+        if user_theme in light_themes:
+            return user_theme
+        return "textual-light"
+
+    counterpart = _DARK_THEME_BY_LIGHT.get(user_theme)
+    if counterpart:
+        return counterpart
+    if user_theme not in light_themes:
+        return user_theme
+    return "textual-dark"
+
+
+def validate_theme(theme: str, fallback: str = "textual-dark") -> str:
+    """Return theme if it is a known Textual theme, otherwise fallback.
+
+    Args:
+        theme: Theme name to validate.
+        fallback: Theme name to use when the supplied theme is unknown.
+
+    Returns:
+        A valid theme name.
+    """
+    from textual.theme import BUILTIN_THEMES
+
+    if isinstance(theme, str) and theme.strip() and theme.strip() in BUILTIN_THEMES:
+        return theme.strip()
+    return fallback
 
 
 @dataclass

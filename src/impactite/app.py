@@ -42,7 +42,7 @@ from textual.widgets._select import NoSelection
 
 from impactite.core import (
     Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, QueryEngine, SearchState, TagIndex,
-    find_matches, parse_form_definition, parse_base_definition,
+    find_matches, parse_form_definition, parse_base_definition, resolve_theme_variant, validate_theme,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.templater import collect_templates, build_context, render_template
@@ -2478,7 +2478,8 @@ class MarkdownEditorApp(App):
         self.parser = MarkdownParser(
             syntax_theme=self.config.display.get("syntax_theme", "monokai")
         )
-        self.theme = self.config.display.get("app_theme", "textual-dark")
+        self._suppress_theme_persist = False
+        self.theme = validate_theme(self.config.get_user_theme())
 
         self.current_file: Optional[Path] = None
         self.is_edit_mode = False
@@ -2917,21 +2918,27 @@ class MarkdownEditorApp(App):
             editor.theme = self.config.display.get("syntax_theme", "monokai")
 
     def watch_theme(self, theme: str) -> None:
-        """Сохранить выбранную тему в конфиг при любом изменении."""
-        if getattr(self, "config", None):
-            self.config.save_theme(theme)
+        """Сохранить выбранную тему в конфиг, если изменение не от переключателя Ctrl+L."""
+        if getattr(self, "config", None) and not self._suppress_theme_persist:
+            self.config.save_user_theme(theme)
 
     def action_toggle_theme(self) -> None:
-        """Переключить светлую / тёмную тему."""
-        if self.theme in _LIGHT_THEMES:
-            new_theme = self.config.display.get("app_theme", "textual-dark")
-            if new_theme in _LIGHT_THEMES:
-                new_theme = "textual-dark"
-        else:
-            new_theme = "textual-light"
-        self.theme = new_theme
-        editor = self.query_one("#editor", TextArea)
-        self._apply_editor_syntax_theme(editor)
+        """Переключить светлую / тёмную вариант пользовательской темы."""
+        is_light = self.theme in _LIGHT_THEMES
+        user_theme = self.config.get_user_theme()
+        target_light = not is_light
+        new_theme = resolve_theme_variant(user_theme, target_light, _LIGHT_THEMES)
+
+        self._suppress_theme_persist = True
+        try:
+            self.theme = new_theme
+        finally:
+            self._suppress_theme_persist = False
+
+        editor_container = self.query_one("#editor-container")
+        if editor_container.display:
+            editor = self.query_one("#editor", TextArea)
+            self._apply_editor_syntax_theme(editor)
         # Перерисовать открытый файл с новой темой кода
         if self.current_file and not self.is_edit_mode:
             viewer = self.query_one("#viewer", MarkdownViewer)
@@ -3070,6 +3077,7 @@ class MarkdownEditorApp(App):
             base.display   = False
             self._original_content = content
             editor.load_text(content)
+            self._apply_editor_syntax_theme(editor)
             self._apply_editor_search_match()
         else:
             form_def = parse_form_definition(content)
