@@ -1,6 +1,6 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
-shell commands, and other important information, read specs/004-editor-theme-sync/plan.md
+shell commands, and other important information, read specs/008-add-w311-theme/plan.md
 <!-- SPECKIT END -->
 
 # Impactite Agent Guide
@@ -48,7 +48,7 @@ and is integrated with **hermes-agent**.
 
 - **Constitution**: `.specify/memory/constitution.md` — highest-priority technical
   constraints; consult it before any architectural decision.
-- **Current Feature Plan**: `specs/004-editor-theme-sync/plan.md`.
+- **Current Feature Plan**: `specs/008-add-w311-theme/plan.md`.
 - **Agent Context**: This file (`AGENTS.md`) is managed by the SpecKit
   `agent-context` extension. The block between `<!-- SPECKIT START -->` and
   `<!-- SPECKIT END -->` is refreshed automatically by SpecKit hooks.

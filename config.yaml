@@ -38,7 +38,7 @@ display:
   word_wrap: true             # Перенос слов в редакторе
   syntax_theme: "monokai"     # Тема синтаксиса редактора (monokai, dracula, vscode_dark, github_light)
   code_border: "round"        # Стиль рамки для блоков кода (round, box, double)
-  app_theme: "rose-pine-moon"   # Тема приложения: textual-dark, textual-light, solarized-light,
+  app_theme: "w311"   # Тема приложения: textual-dark, textual-light, solarized-light,
   sidebar_width: 43
                               # catppuccin-latte, rose-pine-dawn, atom-one-light, dracula, monokai...
 

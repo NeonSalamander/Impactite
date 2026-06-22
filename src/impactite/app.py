@@ -19,6 +19,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import (
     Button,
     Footer,
@@ -41,8 +42,9 @@ from textual.widgets.selection_list import Selection
 from textual.widgets._select import NoSelection
 
 from impactite.core import (
-    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, QueryEngine, SearchState, TagIndex,
-    find_matches, parse_form_definition, parse_base_definition, resolve_theme_variant, validate_theme,
+    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, OpenUrlError, QueryEngine, SearchState, TagIndex,
+    find_external_links, find_matches, is_external_url, open_url, parse_form_definition, parse_base_definition,
+    resolve_theme_variant,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.templater import collect_templates, build_context, render_template
@@ -50,8 +52,42 @@ from impactite.table_engine import process_table_with_formulas
 
 _LIGHT_THEMES: frozenset[str] = frozenset({
     "textual-light", "solarized-light", "catppuccin-latte",
-    "rose-pine-dawn", "atom-one-light",
+    "rose-pine-dawn", "atom-one-light", "w311",
 })
+
+# TurboVision-inspired theme.
+TV_THEME: Theme = Theme(
+    name="tv",
+    primary="#00aaaa",
+    secondary="#5555ff",
+    warning="#ffff00",
+    error="#ff5555",
+    success="#00ff00",
+    accent="#ffff00",
+    foreground="#ffffff",
+    background="#0000aa",
+    surface="#0000aa",
+    panel="#0000aa",
+    boost="#00005f",
+    dark=True,
+)
+
+# Windows 3.11-inspired theme.
+W311_THEME: Theme = Theme(
+    name="w311",
+    primary="#000080",
+    secondary="#808080",
+    warning="#ffff00",
+    error="#ff0000",
+    success="#008000",
+    accent="#000080",
+    foreground="#000000",
+    background="#c0c0c0",
+    surface="#c0c0c0",
+    panel="#c0c0c0",
+    boost="#ffffff",
+    dark=False,
+)
 
 # ============================================================================
 # Виджеты
@@ -288,6 +324,12 @@ class MarkdownViewer(Static):
             self.text = text
             super().__init__()
 
+    class ExternalLinkClicked(Message):
+        def __init__(self, url: str, text: str) -> None:
+            self.url = url
+            self.text = text
+            super().__init__()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._content = ""
@@ -298,6 +340,8 @@ class MarkdownViewer(Static):
         self._checkbox_lines: list = []
         # Информация о внутренних ссылках: None или список dict'ов
         self._link_lines: list = []
+        # Информация о внешних ссылках: None или список dict'ов
+        self._external_link_lines: list = []
 
     def compose(self):
         yield ViewerLog(markup=True, highlight=False, wrap=True)
@@ -325,6 +369,15 @@ class MarkdownViewer(Static):
                 for link in link_data:
                     if link["start"] <= col <= link["end"]:
                         self.post_message(self.LinkClicked(link["target"], link["text"]))
+                        return
+
+        # Внешняя ссылка?
+        if line_idx < len(self._external_link_lines):
+            ext_data = self._external_link_lines[line_idx]
+            if ext_data:
+                for link in ext_data:
+                    if link["start"] <= col <= link["end"]:
+                        self.post_message(self.ExternalLinkClicked(link["url"], link["text"]))
                         return
 
         # Чекбокс?
@@ -368,6 +421,7 @@ class MarkdownViewer(Static):
         self._tag_lines = []
         self._checkbox_lines = []
         self._link_lines = []
+        self._external_link_lines = []
         log = self.query_one(ViewerLog)
         log.clear()
 
@@ -376,6 +430,7 @@ class MarkdownViewer(Static):
             self._tag_lines.append(None)
             self._checkbox_lines.append(None)
             self._link_lines.append(None)
+            self._external_link_lines.append(None)
             return
 
         lines = content.split("\n")
@@ -421,6 +476,7 @@ class MarkdownViewer(Static):
                         self._tag_lines.append(None)
                         self._checkbox_lines.append(None)
                         self._link_lines.append(None)
+                        self._external_link_lines.append(None)
                     in_code_block = False
                 continue
 
@@ -438,6 +494,7 @@ class MarkdownViewer(Static):
                         self._tag_lines.append(None)
                         self._checkbox_lines.append(None)
                         self._link_lines.append(None)
+                        self._external_link_lines.append(None)
                     skip_until = next_idx - 1
                     continue
 
@@ -449,13 +506,15 @@ class MarkdownViewer(Static):
                 prefix_spaces = " " * len(indent_str)
                 checkbox_display = f"[bold green]{escape('[x]')}[/bold green]" if is_checked else f"[bold red]{escape('[ ]')}[/bold red]"
                 pre_len = len(indent_str) + 3 + 1  # indent + [x]/[ ] + space
-                formatted_text, links = self._process_formatting_inline(self._apply_highlights_range(text, line_idx, pre_len))
+                formatted_text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(text, line_idx, pre_len))
                 log.write(f"{prefix_spaces}{checkbox_display} {formatted_text}")
                 cb_start = len(prefix_spaces)
                 cb_end = cb_start + 3
                 offset = len(prefix_spaces) + 4
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in links] if links else None
+                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
+                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
                 self._checkbox_lines.append({
                     "source_line": line_idx,
                     "cb_start": cb_start,
@@ -463,6 +522,7 @@ class MarkdownViewer(Static):
                 })
                 self._tag_lines.append(None)
                 self._link_lines.append(link_data)
+                self._external_link_lines.append(ext_data)
                 continue
 
             # Заголовки
@@ -471,49 +531,61 @@ class MarkdownViewer(Static):
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+                self._external_link_lines.append(None)
             elif line.startswith("## "):
                 log.write(f"[bold blue]{self._apply_highlights_range(line[3:], line_idx, 3)}[/bold blue]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+                self._external_link_lines.append(None)
             elif line.startswith("### "):
                 log.write(f"[bold green]{self._apply_highlights_range(line[4:], line_idx, 4)}[/bold green]")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+                self._external_link_lines.append(None)
             # Списки
             elif line.startswith("- ") or line.startswith("* "):
-                text, links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
+                text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
                 log.write(f"  • {text}")
                 offset = 4
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in links] if links else None
+                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
+                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
+                self._external_link_lines.append(ext_data)
             elif re.match(r"^\d+\. ", line):
                 match = re.match(r"^(\d+)\. (.*)", line)
                 if match:
                     num = match.group(1)
                     prefix_len = len(num) + 2  # "N. "
-                    text, links = self._process_formatting_inline(self._apply_highlights_range(match.group(2), line_idx, prefix_len))
+                    text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(match.group(2), line_idx, prefix_len))
                     log.write(f"  {num}. {text}")
                     offset = len(f"  {num}. ")
                     link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                                  "target": l["target"], "text": l["text"]} for l in links] if links else None
+                                  "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
+                    ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                                 "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
                     self._tag_lines.append(None)
                     self._checkbox_lines.append(None)
                     self._link_lines.append(link_data)
+                    self._external_link_lines.append(ext_data)
             # Цитаты
             elif line.startswith("> "):
-                text, links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
+                text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
                 log.write(f"[italic yellow]  {text}[/italic yellow]")
                 offset = 2
                 link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in links] if links else None
+                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
+                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
+                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
+                self._external_link_lines.append(ext_data)
             # Теги
             elif re.search(r"#\w+", line):
                 try:
@@ -539,27 +611,33 @@ class MarkdownViewer(Static):
                 self._tag_lines.append((tags_in_line, line))
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
-            # Inline-форматирование
-            elif any(m in line for m in ("**", "__", "~~", "*", "_[", "](")):
-                formatted, links = self._process_formatting_inline(self._apply_highlights_range(line, line_idx, 0))
+                self._external_link_lines.append(None)
+            # Inline-форматирование и внешние ссылки
+            elif any(m in line for m in ("**", "__", "~~", "*", "_[", "](")) or "http://" in line or "https://" in line:
+                formatted, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line, line_idx, 0))
                 log.write(formatted)
                 link_data = [{"start": l["start"], "end": l["end"],
-                              "target": l["target"], "text": l["text"]} for l in links] if links else None
+                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
+                ext_data = [{"start": l["start"], "end": l["end"],
+                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
+                self._external_link_lines.append(ext_data)
             # Пустые строки
             elif not line.strip():
                 log.write("")
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+                self._external_link_lines.append(None)
             # Обычный текст
             else:
                 log.write(self._apply_highlights_range(line, line_idx, 0))
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(None)
+                self._external_link_lines.append(None)
 
         if self._current_match_line is not None:
             try:
@@ -637,32 +715,71 @@ class MarkdownViewer(Static):
 
         log.write(rich_table)
 
-    def _process_formatting_inline(self, line: str) -> tuple[str, list]:
-        """Обработать inline-форматирование markdown.
+    def _process_formatting_inline(self, line: str) -> tuple[str, list, list]:
+        """Обработать inline-форматирование markdown и ссылки.
 
-        Возвращает (отформатированная строка, список внутренних ссылок).
-        Каждая ссылка: dict(start, end, target, text) — позиции в отформатированной строке.
+        Возвращает (отформатированная строка, внутренние ссылки, внешние ссылки).
+        Каждая ссылка: dict(start, end, target/url, text) — позиции в отформатированной строке.
         """
-        links: list = []
-        parts: list = []
-        last_end = 0
-        for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line):
+        internal_links: list = []
+        external_links: list = []
+
+        # Защита inline-кода: не делать ссылками URL внутри `...`
+        code_spans = list(re.finditer(r'`[^`]+`', line))
+
+        def _inside_code(pos: int) -> bool:
+            return any(span.start() < pos < span.end() for span in code_spans)
+
+        # Markdown inline links + raw URLs, объединённые по позиции
+        matches: list[tuple[int, int, str, tuple]] = []
+        md_iter = re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line)
+        for match in md_iter:
+            if _inside_code(match.start()) or _inside_code(match.end()):
+                continue
             text = match.group(1)
             url = match.group(2)
-            parts.append(line[last_end:match.start()])
-            if re.match(r'^(https?://|mailto:)', url):
-                link_markup = f'[link={url}]{text}[/link]'
+            if is_external_url(url):
+                matches.append((match.start(), match.end(), "external_md", (text, url)))
             else:
-                start_pos = sum(len(p) for p in parts)
-                links.append({
+                matches.append((match.start(), match.end(), "internal", (text, url)))
+
+        if "http://" in line or "https://" in line:
+            for link in find_external_links(line):
+                if link.source_kind != "raw":
+                    continue
+                if _inside_code(link.start) or _inside_code(link.end):
+                    continue
+                # Пропускаем raw URL, перекрывающийся с Markdown-ссылкой
+                if any(ms <= link.start < me or ms < link.end <= me for ms, me, _, _ in matches):
+                    continue
+                matches.append((link.start, link.end, "external_raw", (link.text, link.url)))
+
+        matches.sort()
+
+        parts: list = []
+        last_end = 0
+        for start, end, kind, payload in matches:
+            if start < last_end:
+                continue
+            parts.append(line[last_end:start])
+            text, target = payload
+            start_pos = sum(len(p) for p in parts)
+            if kind == "internal":
+                internal_links.append({
                     "start": start_pos,
                     "end": start_pos + len(text) - 1,
-                    "target": url,
+                    "target": target,
                     "text": text,
                 })
-                link_markup = f'[underline blue]{text}[/underline blue]'
-            parts.append(link_markup)
-            last_end = match.end()
+            else:
+                external_links.append({
+                    "start": start_pos,
+                    "end": start_pos + len(text) - 1,
+                    "url": target,
+                    "text": text,
+                })
+            parts.append(f'[underline blue]{text}[/underline blue]')
+            last_end = end
         parts.append(line[last_end:])
         line = ''.join(parts)
 
@@ -676,7 +793,7 @@ class MarkdownViewer(Static):
         line = re.sub(r"\*(.+?)\*", r"[italic]\1[/italic]", line)
         # _курсив_
         line = re.sub(r"_(.+?)_", r"[italic]\1[/italic]", line)
-        return line, links
+        return line, internal_links, external_links
 
     def _find_highlights(
         self,
@@ -2479,7 +2596,10 @@ class MarkdownEditorApp(App):
             syntax_theme=self.config.display.get("syntax_theme", "monokai")
         )
         self._suppress_theme_persist = False
-        self.theme = validate_theme(self.config.get_user_theme())
+        self.register_theme(TV_THEME)
+        self.register_theme(W311_THEME)
+        user_theme = self.config.get_user_theme()
+        self.theme = user_theme if self.get_theme(user_theme) else "textual-dark"
 
         self.current_file: Optional[Path] = None
         self.is_edit_mode = False
@@ -3219,6 +3339,13 @@ class MarkdownEditorApp(App):
             self._navigate_to(target)
         else:
             self.notify(_("File not found: {path}", path=str(target)), severity="error")
+
+    def on_markdown_viewer_external_link_clicked(self, event: MarkdownViewer.ExternalLinkClicked) -> None:
+        """Клик по внешней http/https ссылке — открыть системным браузером."""
+        try:
+            open_url(event.url)
+        except OpenUrlError:
+            self.notify(_("Could not open link: {url}", url=event.url), severity="error")
 
     def on_markdown_viewer_checkbox_toggled(self, event: MarkdownViewer.CheckboxToggled) -> None:
         """Переключить чекбокс в markdown-файле и сохранить."""

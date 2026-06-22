@@ -127,6 +127,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Search in note": "Поиск по заметке",
         "Find in note...": "Искать в заметке...",
         "No matches": "Нет совпадений",
+        # Внешние ссылки
+        "Could not open link: {url}": "Не удалось открыть ссылку: {url}",
     },
     "de": {
         # Виджеты / просмотр
@@ -233,6 +235,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Search in note": "In Notiz suchen",
         "Find in note...": "In Notiz suchen...",
         "No matches": "Keine Treffer",
+        # Externe Links
+        "Could not open link: {url}": "Link konnte nicht geöffnet werden: {url}",
     },
 }
 

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import webbrowser
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Tuple, Union, Any
 from dataclasses import dataclass, field
@@ -1786,6 +1787,130 @@ class FullTextIndex:
     def extract_terms(self, query: str) -> List[str]:
         """Вернуть список нормализованных терминов для подсветки совпадений."""
         return [t.lower() for t in re.findall(r"\w+", query) if t.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Внешние ссылки (http/https)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExternalLink:
+    """Информация о кликабельной внешней ссылке в строке заметки."""
+    url: str
+    text: str
+    start: int
+    end: int
+    source_kind: str  # "raw" или "markdown"
+
+
+class OpenUrlError(Exception):
+    """Не удалось открыть URL системным обработчиком."""
+
+
+# Достаточно широкий, но разумно ограниченный шаблон для http/https URL.
+# Исключает пробелы, угловые скобки, кавычки и обратную косую черту.
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>\"{}|\\^`\[\]]+")
+
+
+def _strip_trailing_punctuation(url: str) -> str:
+    """Убрать из конца URL знаки препинания, которые вероятнее всего
+    являются частью предложения, а не URL."""
+    while url and url[-1] in '.,;:!?)':
+        if url[-1] == ")":
+            # Убираем закрывающую скобку только если нет открывающей внутри URL.
+            if "(" not in url:
+                url = url[:-1]
+            else:
+                break
+        else:
+            url = url[:-1]
+    return url
+
+
+def is_external_url(target: str) -> bool:
+    """Вернуть True, если цель ссылки — внешний http/https URL."""
+    return target.startswith("http://") or target.startswith("https://")
+
+
+def find_external_links(line: str) -> List[ExternalLink]:
+    """Найти внешние http/https ссылки в строке.
+
+    Обнаруживает:
+    - Явно записанные URL: https://ya.ru
+    - Markdown-ссылки: [text](https://ya.ru)
+
+    Возвращает список ExternalLink с позициями в исходной строке.
+    """
+    links: List[ExternalLink] = []
+
+    # Markdown inline links
+    for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line):
+        text = match.group(1)
+        url = match.group(2)
+        if is_external_url(url):
+            links.append(ExternalLink(
+                url=url,
+                text=text,
+                start=match.start(),
+                end=match.end(),
+                source_kind="markdown",
+            ))
+
+    # Raw URLs
+    for match in _HTTP_URL_RE.finditer(line):
+        # Пропускаем URL, которые уже являются частью Markdown-ссылки
+        is_inside_markdown = any(
+            ml.start <= match.start() < ml.end for ml in links
+        )
+        if is_inside_markdown:
+            continue
+        url = _strip_trailing_punctuation(match.group(0))
+        if not url:
+            continue
+        links.append(ExternalLink(
+            url=url,
+            text=url,
+            start=match.start(),
+            end=match.start() + len(url),
+            source_kind="raw",
+        ))
+
+    return links
+
+
+def open_url(url: str) -> None:
+    """Открыть URL в системном браузере/обработчике.
+
+    На время вызова перенаправляет stdout и stderr в /dev/null, чтобы
+    предупреждения запущенного браузера/десктоп-процесса не попадали в TUI.
+
+    Raises:
+        OpenUrlError: если URL не удалось открыть.
+    """
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    opened = False
+    exc_info: Optional[Exception] = None
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        try:
+            opened = webbrowser.open(url, new=2)  # new=2 -> new tab, when possible
+        except Exception as exc:
+            exc_info = exc
+        finally:
+            os.dup2(saved_stdout, 1)
+            os.dup2(saved_stderr, 2)
+    finally:
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+        os.close(devnull_fd)
+
+    if exc_info is not None:
+        raise OpenUrlError(str(exc_info)) from exc_info
+    if not opened:
+        raise OpenUrlError("No handler registered for URL")
 
 
 if __name__ == "__main__":
