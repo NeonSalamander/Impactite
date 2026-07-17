@@ -14,6 +14,7 @@ Obsidian, geschrieben in Python mit den Bibliotheken **Rich** und **Textual**.
 - 🏷️ **Tag-Wolke** — alle Tags mit individuellen Farben, anklickbar
 - 🔍 **Tag-Suche** — modales Fenster mit anklickbaren Ergebnissen
 - 🕸️ **Verknüpfungsgraph** — hierarchischer Baum der Beziehungen zwischen Notizen und Tags; alle Knoten anklickbar (Notizen öffnen, Tags suchen)
+- 🔗 **Rückverweis-Panel** — fixiertes Panel unter der Notiz listet alle Notizen, die auf sie verlinken; ein Klick öffnet die Quelle
 - 🎨 **Helles/dunkles Thema** — Umschalten im laufenden Betrieb oder über die Befehlspalette; die Auswahl wird automatisch gespeichert
 - 🌐 **Oberflächenlokalisierung** — Englisch, Russisch, Deutsch
 - 📝 **Eingabeformulare** — Formularnotizen mit Feldern, gespeichert in eine Datei oder eine Datenbank

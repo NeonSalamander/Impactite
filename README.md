@@ -15,6 +15,7 @@ Python with the **Rich** and **Textual** libraries.
 - 🏷️ **Tag cloud** — all tags with individual colors, clickable
 - 🔍 **Tag search** — modal window with clickable results
 - 🕸️ **Link graph** — hierarchical tree of note-tag relationships; all nodes clickable (notes open, tags search)
+- 🔗 **Backlinks panel** — fixed panel under the note lists all notes that link to it; click a source to jump to it
 - 🎨 **Light/dark theme** — toggle on the fly or via the command palette; your choice is saved automatically
 - 🌐 **Interface localization** — English, Russian, German
 - 📝 **Input forms** — form notes with fields, saved to a file or a database

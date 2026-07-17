@@ -1,6 +1,7 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
-shell commands, and other important information, read specs/008-add-w311-theme/plan.md
+shell commands, and other important information, read the current plan
+at specs/017-remember-user-theme/plan.md
 <!-- SPECKIT END -->
 
 # Impactite Agent Guide

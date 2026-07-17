@@ -10,13 +10,15 @@ from typing import Dict, List, Optional, Set, Any, Tuple
 
 from rich.console import Console
 from rich.markup import escape
+from rich.style import Style
+from rich.color import Color
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
@@ -42,7 +44,7 @@ from textual.widgets.selection_list import Selection
 from textual.widgets._select import NoSelection
 
 from impactite.core import (
-    Config, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, OpenUrlError, QueryEngine, SearchState, TagIndex,
+    Config, DirectoryStyle, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, OpenUrlError, QueryEngine, SearchState, TagIndex,
     find_external_links, find_matches, is_external_url, open_url, parse_form_definition, parse_base_definition,
     resolve_theme_variant,
 )
@@ -150,21 +152,37 @@ class FileTree(Tree):
 
         pass
 
+    class DirectoryContextMenuRequested(Message):
+        """Сообщение о запросе контекстного меню для каталога."""
+
+        def __init__(self, path: Path, x: int, y: int):
+            self.path = path
+            self.x = x
+            self.y = y
+            super().__init__()
+
     def __init__(self, root_label: str, **kwargs):
         super().__init__(root_label, **kwargs)
-        self.show_root = False
+        self.directory_styles: Dict[str, DirectoryStyle] = {}
         self.file_nodes: Dict[int, Path] = {}
         self.dir_nodes: Dict[int, Path] = {}
         self.root_path: Optional[Path] = None
         # Текущий выбранный каталог (для создания заметок/папок)
         self.selected_dir: Optional[Path] = None
         self.graph_node_id: Optional[int] = None
+        self.show_root = False
 
-    def populate_tree(self, file_system: FileSystem, favorites: Optional[List[str]] = None):
+    def populate_tree(
+        self,
+        file_system: FileSystem,
+        directory_styles: Optional[Dict[str, DirectoryStyle]] = None,
+        favorites: Optional[List[str]] = None,
+    ):
         """Заполнить дерево файлами."""
         self.clear()
         self.file_nodes.clear()
         self.dir_nodes.clear()
+        self.directory_styles = directory_styles or {}
         self.graph_node_id = None
         self.root_path = file_system.root_path
         self.root.expand()
@@ -196,13 +214,71 @@ class FileTree(Tree):
         """Рекурсивно добавить узлы."""
         for child in sorted(file_node.children):
             if child.is_dir:
-                dir_node = parent_node.add(f"📁 {child.name}", expand=False)
+                dir_node = parent_node.add(f"📁 {child.name}", expand=False, data=child.path)
                 self.dir_nodes[id(dir_node)] = child.path
                 self._add_nodes(dir_node, child)
             else:
                 icon = "📄" if child.name.endswith(".md") else "📎"
                 node = parent_node.add(f"{icon} {child.name}")
                 self.file_nodes[id(node)] = child.path
+
+    def _directory_style_for_node(self, node: Any) -> Optional[DirectoryStyle]:
+        """Найти сохранённый стиль для узла-каталога."""
+        if not self.directory_styles or not self.root_path:
+            return None
+        if not node.data or not isinstance(node.data, Path):
+            return None
+        try:
+            rel = node.data.relative_to(self.root_path).as_posix()
+        except ValueError:
+            return None
+        return self.directory_styles.get(rel)
+
+    def render_label(self, node: Any, base_style: Style, style: Style) -> Text:
+        text = super().render_label(node, base_style, style)
+        style_data = self._directory_style_for_node(node)
+        if style_data and style_data.text:
+            try:
+                text = text.copy()
+                text.stylize(Style(color=Color.parse(style_data.text)))
+            except Exception:
+                pass
+        return text
+
+    def _render_line(self, y: int, x1: int, x2: int, base_style: Style) -> Any:
+        if 0 <= y < len(self._tree_lines):
+            node = self._tree_lines[y].node
+            style_data = self._directory_style_for_node(node)
+            if style_data and style_data.background:
+                try:
+                    base_style = base_style + Style(bgcolor=Color.parse(style_data.background))
+                except Exception:
+                    pass
+        return super()._render_line(y, x1, x2, base_style)
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        """Открыть контекстное меню при правом клике по каталогу."""
+        if event.button != 3:
+            await super()._on_mouse_down(event)
+            return
+
+        line = self.hover_line
+        if line is None or line < 0:
+            event.stop()
+            return
+
+        node = self.get_node_at_line(line)
+        if node is None or not isinstance(node.data, Path) or not node.data.is_dir():
+            event.stop()
+            return
+
+        self.cursor_line = line
+        self.select_node(node)
+        self.selected_dir = node.data
+        self.post_message(
+            self.DirectoryContextMenuRequested(node.data, event.screen_x, event.screen_y)
+        )
+        event.stop()
 
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """Обработать выбор узла."""
@@ -345,6 +421,7 @@ class MarkdownViewer(Static):
 
     def compose(self):
         yield ViewerLog(markup=True, highlight=False, wrap=True)
+        yield BacklinksPanel(id="backlinks-panel")
 
     def action_scroll_up(self)   -> None: self.query_one(ViewerLog).scroll_up()
     def action_scroll_down(self) -> None: self.query_one(ViewerLog).scroll_down()
@@ -871,6 +948,39 @@ class MarkdownViewer(Static):
             log.write(f"[italic dim]{_('0 records')}[/italic dim]")
         # высота: рамки сверху/снизу + заголовок + разделитель + строки
         return len(rows) + 4
+
+
+class BacklinksPanel(Vertical):
+    """Закреплённая панель обратных ссылок для текущей заметки."""
+
+    class BacklinkSelected(Message):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            super().__init__()
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def compose(self) -> ComposeResult:
+        yield Label(f"[bold]{_('Linked references')}[/bold]", id="backlinks-title")
+        yield ListView(id="backlinks-list")
+
+    def set_backlinks(self, paths: List[Path], root: Path) -> None:
+        """Заполнить список; панель скрывается, когда обратных ссылок нет."""
+        list_view = self.query_one("#backlinks-list", ListView)
+        list_view.clear()
+        for p in paths:
+            try:
+                label = str(p.relative_to(root))
+            except ValueError:
+                label = str(p)
+            list_view.append(ListItem(Label(f"📄 {label}"), name=str(p)))
+        self.display = bool(paths)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        event.stop()
+        if event.item and event.item.name:
+            self.post_message(self.BacklinkSelected(Path(event.item.name)))
 
 
 class FormView(VerticalScroll):
@@ -1685,7 +1795,6 @@ class InNoteSearch(ModalScreen):
     DEFAULT_CSS = """
     InNoteSearch {
         align: center top;
-        background: transparent;
     }
 
     InNoteSearch #in-note-search-container {
@@ -1961,6 +2070,147 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class DirectoryColorModal(ModalScreen[Optional[Tuple[str, str]]]):
+    """Модальное окно выбора фона и цвета текста для каталога."""
+
+    class _ColorInput(Input):
+        """Поле ввода цвета, сообщающее родителю о получении фокуса."""
+
+        class Focused(Message):
+            def __init__(self, input_id: str) -> None:
+                self.input_id = input_id
+                super().__init__()
+
+        def on_focus(self, event: events.Focus) -> None:
+            if self.id is not None:
+                self.post_message(self.Focused(self.id))
+
+    _COLOR_PRESETS: List[str] = [
+        "#000000", "#ffffff", "#808080", "#ff0000",
+        "#00ff00", "#0000ff", "#ffff00", "#ff00ff",
+        "#00ffff", "#8b0000", "#006400", "#00008b",
+        "#ffa500", "#800080", "#008080", "#ffc0cb",
+    ]
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, background: str = "", text: str = "", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._title = title
+        self._background = background
+        self._text = text
+        self._last_focused_input_id = "color-bg-input"
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Label(f"[bold]{self._title}[/bold]"),
+            Label(_("Background color")),
+            self._ColorInput(placeholder="#ff0000", value=self._background, id="color-bg-input"),
+            Label(_("Text color")),
+            self._ColorInput(placeholder="#ffffff", value=self._text, id="color-fg-input"),
+            Label(_("Preset colors")),
+            Grid(
+                *[Button(" ", id=f"color-preset-{index}") for index in range(len(self._COLOR_PRESETS))],
+                id="color-preset-grid",
+            ),
+            Label(f"[dim]{_('Enter to switch fields, Esc to cancel')}[/dim]"),
+            id="directory-color-modal",
+        )
+
+    def on_mount(self) -> None:
+        for index, color in enumerate(self._COLOR_PRESETS):
+            button = self.query_one(f"#color-preset-{index}", Button)
+            button.styles.background = color
+        self.query_one("#color-bg-input", Input).focus()
+
+    def on__color_input_focused(self, event: _ColorInput.Focused) -> None:
+        if event.input_id in ("color-bg-input", "color-fg-input"):
+            self._last_focused_input_id = event.input_id
+
+    def _target_input_id(self) -> str:
+        focused = self.app.focused
+        focused_id = focused.id if focused else None
+        return focused_id if focused_id == "color-fg-input" else self._last_focused_input_id
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id is not None and button_id.startswith("color-preset-"):
+            index = int(button_id.split("-")[-1])
+            color = self._COLOR_PRESETS[index]
+            input_widget = self.query_one(f"#{self._target_input_id()}", Input)
+            input_widget.value = color
+            input_widget.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "color-bg-input":
+            self.query_one("#color-fg-input", Input).focus()
+        else:
+            self._confirm()
+
+    def _confirm(self) -> None:
+        bg = self.query_one("#color-bg-input", Input).value.strip()
+        fg = self.query_one("#color-fg-input", Input).value.strip()
+        if not bg or not fg:
+            self.notify(_("Both colors are required"), severity="error")
+            return
+        try:
+            Color.parse(bg)
+            Color.parse(fg)
+        except Exception:
+            self.notify(_("Invalid color"), severity="error")
+            return
+        self.dismiss((bg, fg))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DirectoryContextMenu(Container):
+    """Контекстное меню для каталога в дереве файлов."""
+
+    can_focus = True
+    BINDINGS = [Binding("escape", "dismiss", "Dismiss", show=False)]
+
+    class ActionChosen(Message):
+        """Сообщение о выбранном действии в контекстном меню."""
+
+        def __init__(self, path: Path, action_id: str) -> None:
+            self.path = path
+            self.action_id = action_id
+            super().__init__()
+
+    def __init__(self, path: Path, x: int, y: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._path = path
+        self._x = x
+        self._y = y
+
+    def compose(self) -> ComposeResult:
+        with Container(id="directory-context-menu-box"):
+            yield Button(_("Directory settings"), id="directory-settings-btn")
+            yield Button(_("Reset color"), id="directory-reset-btn")
+
+    def on_mount(self) -> None:
+        self.focus()
+        box = self.query_one("#directory-context-menu-box")
+        box.styles.offset = (self._x, self._y)
+
+    def action_dismiss(self) -> None:
+        self.remove()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id:
+            self.post_message(self.ActionChosen(self._path, button_id))
+        self.remove()
+
+    def on_click(self, event: events.Click) -> None:
+        box = self.query_one("#directory-context-menu-box")
+        if box and not box.region.contains(event.screen_x, event.screen_y):
+            self.remove()
+
+
 class TemplateSelectModal(ModalScreen[Optional[str]]):
     """Модальное окно выбора шаблона для создания заметки.
 
@@ -2071,12 +2321,19 @@ class MarkdownEditorApp(App):
         Binding("ctrl+question", "help", "Help"),
         Binding("d", "delete_selected", "Delete", show=False),
         Binding("r", "rename_selected", "Rename", show=False),
+        Binding("c", "set_directory_color", "Color", show=False),
+        Binding("shift+c", "reset_directory_color", "Reset color", show=False),
         Binding("backspace", "go_back", "Back", show=False),
     ]
 
     DEFAULT_CSS = """
     Screen {
         background: $background;
+    }
+
+    /* Shared light dimming for all modal and context-menu backdrops */
+    ModalScreen {
+        background: black 25%;
     }
 
     #main-container {
@@ -2298,6 +2555,25 @@ class MarkdownEditorApp(App):
         height: 1fr;
     }
 
+    #backlinks-panel {
+        display: none;
+        height: auto;
+        max-height: 9;
+        padding: 0 2;
+        border-top: solid $primary-darken-2;
+        background: $surface;
+    }
+
+    #backlinks-title {
+        height: 1;
+    }
+
+    #backlinks-list {
+        height: auto;
+        max-height: 7;
+        background: $surface;
+    }
+
     #editor-container {
         display: none;
         height: 1fr;
@@ -2507,7 +2783,6 @@ class MarkdownEditorApp(App):
 
     UnsavedChangesModal {
         align: center middle;
-        background: $background 50%;
     }
 
     #unsaved-dialog {
@@ -2529,7 +2804,6 @@ class MarkdownEditorApp(App):
 
     TagSearchModal {
         align: center middle;
-        background: $background 50%;
     }
 
     TagSearchModal Container {
@@ -2553,7 +2827,6 @@ class MarkdownEditorApp(App):
 
     TextPromptModal {
         align: center middle;
-        background: $background 50%;
     }
 
     #prompt-container {
@@ -2565,6 +2838,56 @@ class MarkdownEditorApp(App):
     }
 
     #prompt-input {
+        width: 100%;
+        margin: 1 0;
+    }
+
+    #directory-color-modal {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+
+    #directory-color-modal Input {
+        width: 100%;
+        margin: 1 0;
+    }
+
+    #color-preset-grid {
+        grid-size: 8 2;
+        grid-gutter: 0;
+        height: auto;
+        margin: 1 0;
+    }
+
+    #color-preset-grid Button {
+        min-width: 1;
+        width: 3;
+        min-height: 1;
+        height: 1;
+        padding: 0;
+        border: none;
+        margin: 0;
+    }
+
+    DirectoryContextMenu {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        layer: menu;
+    }
+
+    #directory-context-menu-box {
+        width: auto;
+        height: auto;
+        background: $surface;
+        border: solid $primary;
+        padding: 0 1;
+    }
+
+    #directory-context-menu-box Button {
         width: 100%;
         margin: 1 0;
     }
@@ -2595,11 +2918,13 @@ class MarkdownEditorApp(App):
         self.parser = MarkdownParser(
             syntax_theme=self.config.display.get("syntax_theme", "monokai")
         )
-        self._suppress_theme_persist = False
         self.register_theme(TV_THEME)
         self.register_theme(W311_THEME)
         user_theme = self.config.get_user_theme()
-        self.theme = user_theme if self.get_theme(user_theme) else "textual-dark"
+        effective_theme = user_theme if self.get_theme(user_theme) else "textual-dark"
+        self.theme = effective_theme
+        if effective_theme != user_theme:
+            self.config.save_user_theme(effective_theme)
 
         self.current_file: Optional[Path] = None
         self.is_edit_mode = False
@@ -2638,12 +2963,112 @@ class MarkdownEditorApp(App):
         self.tag_cache = self.tag_index.get_tag_files()
         self.tag_colors = self.tag_index.get_tag_colors()
         self.note_links = self.tag_index.get_note_links()
+        self._update_backlinks_panel()
+
+    def _update_backlinks_panel(self) -> None:
+        """Обновить панель обратных ссылок для текущего файла."""
+        try:
+            panel = self.query_one("#backlinks-panel", BacklinksPanel)
+        except Exception:
+            return
+        if not self.current_file:
+            panel.set_backlinks([], self.file_system.root_path)
+            return
+        panel.set_backlinks(
+            self.tag_index.get_backlinks(self.current_file),
+            self.file_system.root_path,
+        )
+
+    def on_backlinks_panel_backlink_selected(self, event: BacklinksPanel.BacklinkSelected) -> None:
+        """Перейти к заметке, ссылающейся на текущую."""
+        self._navigate_to(event.path)
 
     def _refresh_file_tree(self) -> None:
-        """Перестроить дерево файлов с учётом избранного."""
+        """Перестроить дерево файлов с учётом избранного и цветов каталогов."""
         self.query_one("#file-tree", FileTree).populate_tree(
-            self.file_system, self.tag_index.get_favorites()
+            self.file_system, self.config.directory_colors, self.tag_index.get_favorites()
         )
+
+    def action_set_directory_color(self) -> None:
+        """Открыть модалку выбора цвета для текущего каталога."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        target = file_tree.selected_dir or self.file_system.root_path
+        self._open_directory_color_for(target)
+
+    def _open_directory_color_for(self, target: Optional[Path]) -> None:
+        if not target or not self.file_system:
+            self.notify(_("No directory selected"), severity="warning")
+            return
+        try:
+            rel = target.relative_to(self.file_system.root_path).as_posix()
+        except ValueError:
+            self.notify(_("No directory selected"), severity="warning")
+            return
+        current = self.config.get_directory_style(rel)
+        bg = current.background if current else ""
+        fg = current.text if current else ""
+        title = f"{_('Colors for')} {target.name}"
+        self.push_screen(
+            DirectoryColorModal(title, background=bg, text=fg),
+            callback=lambda result: self._on_color_chosen(result, rel),
+        )
+
+    def on_file_tree_directory_context_menu_requested(
+        self, event: FileTree.DirectoryContextMenuRequested
+    ) -> None:
+        """Показать контекстное меню для каталога по правому клику."""
+        self.mount(DirectoryContextMenu(event.path, event.x, event.y))
+
+    def on_directory_context_menu_action_chosen(
+        self, event: DirectoryContextMenu.ActionChosen
+    ) -> None:
+        """Обработать выбор действия в контекстном меню каталога."""
+        if not self.file_system:
+            return
+        try:
+            rel = event.path.relative_to(self.file_system.root_path).as_posix()
+        except ValueError:
+            self.notify(_("No directory selected"), severity="warning")
+            return
+
+        if event.action_id == "directory-settings-btn":
+            self._open_directory_color_for(event.path)
+        elif event.action_id == "directory-reset-btn":
+            self.config.remove_directory_style(rel)
+            self._refresh_file_tree()
+            self.notify(_("Directory color reset"), severity="information")
+
+
+    def _on_color_chosen(
+        self, result: Optional[Tuple[str, str]], rel: str
+    ) -> None:
+        """Применить цвета из модалки к каталогу."""
+        if not result:
+            return
+        bg, fg = result
+        try:
+            self.config.set_directory_style(rel, bg, fg)
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._refresh_file_tree()
+        self.notify(_("Directory color updated"), severity="information")
+
+    def action_reset_directory_color(self) -> None:
+        """Сбросить цвета для текущего каталога."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        target = file_tree.selected_dir or self.file_system.root_path
+        if not target:
+            self.notify(_("No directory selected"), severity="warning")
+            return
+        try:
+            rel = target.relative_to(self.file_system.root_path).as_posix()
+        except ValueError:
+            self.notify(_("No directory selected"), severity="warning")
+            return
+        self.config.remove_directory_style(rel)
+        self._refresh_file_tree()
+        self.notify(_("Directory color reset"), severity="information")
 
     def action_toggle_favorite(self) -> None:
         """Добавить / убрать текущую заметку из избранного."""
@@ -3038,8 +3463,8 @@ class MarkdownEditorApp(App):
             editor.theme = self.config.display.get("syntax_theme", "monokai")
 
     def watch_theme(self, theme: str) -> None:
-        """Сохранить выбранную тему в конфиг, если изменение не от переключателя Ctrl+L."""
-        if getattr(self, "config", None) and not self._suppress_theme_persist:
+        """Сохранить выбранную тему в конфиг при каждом изменении."""
+        if getattr(self, "config", None):
             self.config.save_user_theme(theme)
 
     def action_toggle_theme(self) -> None:
@@ -3048,12 +3473,7 @@ class MarkdownEditorApp(App):
         user_theme = self.config.get_user_theme()
         target_light = not is_light
         new_theme = resolve_theme_variant(user_theme, target_light, _LIGHT_THEMES)
-
-        self._suppress_theme_persist = True
-        try:
-            self.theme = new_theme
-        finally:
-            self._suppress_theme_persist = False
+        self.theme = new_theme
 
         editor_container = self.query_one("#editor-container")
         if editor_container.display:
@@ -3228,6 +3648,7 @@ class MarkdownEditorApp(App):
         self.title = f"Impactite — {self.current_file.name}"
         self._update_status()
         self._update_search_match_status()
+        self._update_backlinks_panel()
 
     def _apply_editor_search_match(self) -> None:
         """Выделить текущее совпадение в редакторе."""

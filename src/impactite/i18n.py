@@ -26,6 +26,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Виджеты / просмотр
         "No tags": "Нет тегов",
         "Tags": "Теги",
+        "Linked references": "Обратные ссылки",
         "Select a file to view": "Выберите файл для просмотра",
         "Query engine unavailable": "Движок запросов недоступен",
         "Query error: {error}": "Ошибка запроса: {error}",
@@ -129,11 +130,27 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "No matches": "Нет совпадений",
         # Внешние ссылки
         "Could not open link: {url}": "Не удалось открыть ссылку: {url}",
+        # Контекстное меню каталогов
+        "Directory settings": "Настройки каталога",
+        "Reset color": "Сбросить цвет",
+        # Цвета каталогов
+        "Background color": "Цвет фона",
+        "Text color": "Цвет текста",
+        "Preset colors": "Готовые цвета",
+        "Enter to switch fields, Esc to cancel": "Enter — переключить поля, Esc — отмена",
+        "Both colors are required": "Необходимо указать оба цвета",
+        "Invalid color": "Некорректный цвет",
+        "No directory selected": "Каталог не выбран",
+        "Colors for": "Цвета для",
+        "Directory color updated": "Цвет каталога обновлён",
+        "Directory color reset": "Цвет каталога сброшен",
+        "Color": "Цвет",
     },
     "de": {
         # Виджеты / просмотр
         "No tags": "Keine Tags",
         "Tags": "Tags",
+        "Linked references": "Rückverweise",
         "Select a file to view": "Wählen Sie eine Datei zur Ansicht",
         "Query engine unavailable": "Abfrage-Engine nicht verfügbar",
         "Query error: {error}": "Abfragefehler: {error}",
@@ -237,6 +254,22 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "No matches": "Keine Treffer",
         # Externe Links
         "Could not open link: {url}": "Link konnte nicht geöffnet werden: {url}",
+        # Kontextmenü für Verzeichnisse
+        "Directory settings": "Verzeichniseinstellungen",
+        "Reset color": "Farbe zurücksetzen",
+        # Verzeichnisfarben
+        "Background color": "Hintergrundfarbe",
+        "Text color": "Textfarbe",
+        "Preset colors": "Voreingestellte Farben",
+        "Enter to switch fields, Esc to cancel": "Enter — Felder wechseln, Esc — abbrechen",
+        "Both colors are required": "Beide Farben sind erforderlich",
+        "Invalid color": "Ungültige Farbe",
+        "No directory selected": "Kein Verzeichnis ausgewählt",
+        "Colors for": "Farben für",
+        "Directory color updated": "Verzeichnisfarbe aktualisiert",
+        "Directory color reset": "Verzeichnisfarbe zurückgesetzt",
+        "Color": "Farbe",
+        "Reset color": "Farbe zurücksetzen",
     },
 }
 

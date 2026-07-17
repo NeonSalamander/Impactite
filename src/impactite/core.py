@@ -18,6 +18,7 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters import TerminalFormatter
 from pygments.styles import get_all_styles
+from rich.color import Color
 
 # LadybugDB import
 try:
@@ -27,6 +28,13 @@ except ImportError:
     # Fallback for development - in production, ladybug should be installed
     ladybug = None
     Connection = None
+
+
+@dataclass(frozen=True)
+class DirectoryStyle:
+    """Пара фон / цвет текста для каталога на дереве."""
+    background: str
+    text: str
 
 
 @dataclass
@@ -40,6 +48,7 @@ class Config:
     daily_notes_folder: str = "Daily notes"
     templates_path: str = "./templates"
     author: str = ""
+    directory_colors: Dict[str, DirectoryStyle] = field(default_factory=dict)
     config_path: str = field(default="config.yaml", repr=False)
 
     def resolve_notes_path(self) -> Path:
@@ -176,6 +185,7 @@ class Config:
             "daily_notes_folder": "Daily notes",
             "templates_path": "templates",
             "author": "",
+            "directory_colors": {},
         }
 
         if os.path.exists(config_path):
@@ -198,9 +208,61 @@ class Config:
                     daily_notes_folder=loaded.get("daily_notes_folder", default_config["daily_notes_folder"]),
                     templates_path=loaded.get("templates_path", default_config["templates_path"]),
                     author=loaded.get("author", default_config["author"]),
+                    directory_colors={
+                        str(rel): DirectoryStyle(
+                            background=str(spec.get("background", "")),
+                            text=str(spec.get("text", "")),
+                        )
+                        for rel, spec in loaded.get("directory_colors", {}).items()
+                        if isinstance(spec, dict)
+                    },
                     config_path=config_path,
                 )
         return cls(config_path=config_path)
+
+    @staticmethod
+    def _validate_color(value: str, *, allow_empty: bool = True) -> str:
+        """Проверить и нормализовать строку цвета."""
+        normalized = value.strip()
+        if allow_empty and not normalized:
+            return normalized
+        try:
+            Color.parse(normalized)
+        except Exception as exc:  # pragma: no cover - цвет парсится при сохранении
+            raise ValueError(f"invalid color: {value}") from exc
+        return normalized
+
+    def get_directory_style(self, rel_path: str) -> Optional[DirectoryStyle]:
+        """Получить сохранённый стиль для каталога по относительному пути."""
+        return self.directory_colors.get(rel_path)
+
+    def set_directory_style(self, rel_path: str, background: str, text: str) -> None:
+        """Сохранить фон и цвет текста для каталога."""
+        bg = self._validate_color(background)
+        fg = self._validate_color(text)
+        self.directory_colors[rel_path] = DirectoryStyle(background=bg, text=fg)
+        self.save_directory_colors()
+
+    def remove_directory_style(self, rel_path: str) -> None:
+        """Сбросить настройки цвета для каталога."""
+        if rel_path in self.directory_colors:
+            del self.directory_colors[rel_path]
+            self.save_directory_colors()
+
+    def save_directory_colors(self) -> None:
+        """Записать раздел directory_colors в config.yaml."""
+        data: Dict[str, Any] = {}
+        config_file = Path(self.config_path).expanduser()
+        if config_file.exists():
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        data["directory_colors"] = {
+            rel: {"background": style.background, "text": style.text}
+            for rel, style in self.directory_colors.items()
+        }
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
 
 # Known light/dark theme pairs used by the Ctrl+L toggle.
@@ -873,9 +935,15 @@ class TagIndex:
                 else:
                     target = target.resolve()
                 if target.exists() and target.is_file():
+                    # MERGE узлов, а не MATCH: на первом запуске (пустой или
+                    # перенесённый индекс) узлов File ещё нет, и MATCH молча
+                    # не создавал бы связи. mtime=0 помечает узел для
+                    # последующей полной обработки в rebuild().
                     self.connection.execute("""
-                        MATCH (f:File {path: $src})
-                        MATCH (t:File {path: $tgt})
+                        MERGE (f:File {path: $src})
+                        ON CREATE SET f.mtime = 0
+                        MERGE (t:File {path: $tgt})
+                        ON CREATE SET t.mtime = 0
                         MERGE (f)-[r:LINKS_TO]->(t)
                     """, {"src": path_str, "tgt": str(target)})
 
@@ -893,6 +961,27 @@ class TagIndex:
         except Exception:
             pass
         return result
+
+    def get_backlinks(self, path: Path) -> List[Path]:
+        """Вернуть отсортированный список файлов, ссылающихся на указанный.
+
+        Обратные ссылки вычисляются по индексу LINKS_TO; самоссылки исключаются.
+        Путь нормализуется так же, как при индексации целей ссылок (resolve).
+        """
+        try:
+            target = str(Path(path).resolve())
+            result = self.connection.execute("""
+                MATCH (f:File)-[:LINKS_TO]->(t:File {path: $path})
+                RETURN f.path AS path
+            """, {"path": target})
+            backlinks = set()
+            while result.has_next():
+                row = result.get_next()
+                if row[0] != target:
+                    backlinks.add(row[0])
+            return sorted(Path(p) for p in backlinks)
+        except Exception:
+            return []
 
     def get_tag_files(self) -> Dict[str, List[Path]]:
         """Вернуть {тег: [Path, ...]} по всем проиндексированным файлам."""
