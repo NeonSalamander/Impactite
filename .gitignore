@@ -93,7 +93,10 @@ docs/_build/
 # SciPy / Pandas
 *.scipy
 
+# Производные индексы хранилищ — пересобираются автоматически, в git не храним
 .rpiv
-samples/.ladybug_index.lbug
 .ladybug_index.lbug
+.ladybug_index.lbug.wal
 .impactite_fts.db
+.impactite_fts.db-wal
+.impactite_fts.db-shm
