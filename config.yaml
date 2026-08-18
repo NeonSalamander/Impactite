@@ -5,7 +5,7 @@
 #   - абсолютный путь:      "/home/user/Documents/MyNotes"
 #   - с домашним каталогом: "~/Notes"
 # Path to the folder with markdown files.
-notes_path: "./samples"
+notes_path: "c:/Notes_Imp"
 
 # Folder name for daily notes (created inside notes_path)
 daily_notes_folder: "Daily notes"
@@ -14,10 +14,10 @@ daily_notes_folder: "Daily notes"
 templates_path: "templates"
 
 # Default author name for template placeholders
-author: ""
+author: "NeonSalamander"
 
 # Interface language: en (English), ru (Русский), de (Deutsch)
-language: "en"
+language: "ru"
 
 # Горячие клавиши
 hotkeys:

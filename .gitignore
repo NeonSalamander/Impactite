@@ -2,6 +2,10 @@
 #SDD
 .specify/
 
+# AI
+.hermes/
+.kimi/
+
 # Конфигурации и секреты Hermes
 .env
 .env.local

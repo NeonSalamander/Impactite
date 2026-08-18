@@ -45,7 +45,7 @@ from textual.widgets._select import NoSelection
 
 from impactite.core import (
     Config, DirectoryStyle, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, OpenUrlError, QueryEngine, SearchState, TagIndex,
-    find_external_links, find_matches, is_external_url, open_url, parse_form_definition, parse_base_definition,
+    find_external_links, find_matches, is_external_url, location_after_frontmatter, open_url, parse_form_definition, parse_base_definition,
     resolve_theme_variant,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
@@ -171,6 +171,8 @@ class FileTree(Tree):
         self.selected_dir: Optional[Path] = None
         self.graph_node_id: Optional[int] = None
         self.show_root = False
+        # Выбор узла не должен сворачивать/разворачивать каталог.
+        self.auto_expand = False
 
     def populate_tree(
         self,
@@ -178,7 +180,10 @@ class FileTree(Tree):
         directory_styles: Optional[Dict[str, DirectoryStyle]] = None,
         favorites: Optional[List[str]] = None,
     ):
-        """Заполнить дерево файлами."""
+        """Заполнить дерево файлами, сохраняя развёрнутость каталогов."""
+        expanded_paths = self._collect_expanded_dir_paths()
+        selected_path = self.selected_dir
+
         self.clear()
         self.file_nodes.clear()
         self.dir_nodes.clear()
@@ -205,6 +210,58 @@ class FileTree(Tree):
 
         tree = file_system.get_tree()
         self._add_nodes(self.root, tree)
+        self._restore_expansion(expanded_paths, selected_path)
+
+    def _collect_expanded_dir_paths(self) -> Set[Path]:
+        """Собрать пути каталогов, узлы которых сейчас развёрнуты."""
+        paths: Set[Path] = set()
+        for node in self._walk_tree_nodes(self.root):
+            if node.is_expanded and isinstance(node.data, Path):
+                paths.add(node.data)
+        return paths
+
+    def _walk_tree_nodes(self, node: Any):
+        """Обойти узлы дерева рекурсивно."""
+        yield node
+        for child in node.children:
+            yield from self._walk_tree_nodes(child)
+
+    def _ancestor_paths(self, path: Path) -> Set[Path]:
+        """Вернуть все пути от корня заметок до ``path`` включительно."""
+        paths: Set[Path] = set()
+        if not self.root_path:
+            return paths
+        try:
+            rel = path.relative_to(self.root_path)
+        except ValueError:
+            return paths
+        current = self.root_path
+        for part in rel.parts:
+            current = current / part
+            paths.add(current)
+        return paths
+
+    def _restore_expansion(self, expanded_paths: Set[Path], selected_path: Optional[Path]) -> None:
+        """Развернуть ранее развёрнутые и выбранные каталоги после перестроения дерева."""
+        paths_to_expand: Set[Path] = set()
+        for path in expanded_paths:
+            paths_to_expand.update(self._ancestor_paths(path))
+        if selected_path:
+            paths_to_expand.update(self._ancestor_paths(selected_path))
+
+        selected_node = None
+        for node in self._walk_tree_nodes(self.root):
+            if not isinstance(node.data, Path):
+                continue
+            if node.data in paths_to_expand:
+                node.expand()
+            if node.data == selected_path:
+                selected_node = node
+
+        if selected_node is not None:
+            # Node lines are not computed until the next refresh, so schedule
+            # selection instead of moving the cursor immediately.
+            self.call_after_refresh(self.select_node, selected_node)
 
     def current_dir(self) -> Optional[Path]:
         """Каталог, в котором создавать новые заметки/папки."""
@@ -3844,8 +3901,9 @@ class MarkdownEditorApp(App):
                 new_text = f"```\n{selected}\n```"
                 editor.replace(new_text, start, end)
             else:
-                editor.insert("```\n\n```", start)
-                editor.move_cursor((start[0] + 1, 0))
+                safe_start = location_after_frontmatter(editor.text, start)
+                editor.insert("```\n\n```", safe_start)
+                editor.move_cursor((safe_start[0] + 1, 0))
         elif event.action == "hr":
             editor.insert("\n---\n", start)
             editor.move_cursor((start[0] + 2, 0))

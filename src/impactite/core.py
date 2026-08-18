@@ -327,6 +327,49 @@ def validate_theme(theme: str, fallback: str = "textual-dark") -> str:
     return fallback
 
 
+def location_after_frontmatter(text: str, location: Tuple[int, int]) -> Tuple[int, int]:
+    """Return a safe insertion location that is not inside YAML frontmatter.
+
+    A YAML frontmatter block is recognised when the first line equals ``---``
+    and a later line also equals ``---``. If ``location`` lies inside that
+    block or before its closing fence, the returned location is the first
+    non-blank line after the closing fence, or the end of the document when
+    only blank lines follow.
+
+    Args:
+        text: The document text.
+        location: Cursor position as ``(row, column)``.
+
+    Returns:
+        Either the original location or a location after the frontmatter.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return location
+
+    closing = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            closing = i
+            break
+
+    if closing is None:
+        return location
+
+    row, _col = location
+    if row > closing:
+        return location
+
+    new_row = closing + 1
+    while new_row < len(lines) and lines[new_row].strip() == "":
+        new_row += 1
+
+    if new_row >= len(lines):
+        return (len(lines), 0)
+
+    return (new_row, 0)
+
+
 @dataclass
 class FileNode:
     """Узел файлового дерева."""
