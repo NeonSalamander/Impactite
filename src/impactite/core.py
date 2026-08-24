@@ -1497,7 +1497,8 @@ class QueryEngine:
             else:
                 source = raw.lower()
             if source not in ("notes", "database"):
-                source = "notes"
+                # "FROM <путь>" без префикса — считать подпапкой notes
+                source, filt = "notes", raw.strip()
         # SELECT
         select = None
         if "SELECT" in clauses:

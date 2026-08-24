@@ -1441,7 +1441,24 @@ class BaseView(VerticalScroll):
             table.add_column(str(col))
         for row in rows:
             table.add_row(*[str(row.get(c, "")) for c in self._columns])
-        log.write(table)
+        # Отрендерить таблицу вручную с очень большой шириной консоли, чтобы
+        # длинные значения (например, список тегов) не переносились Rich'ем
+        # на дополнительные строки ячейки, а оставались в одной строке
+        # (RichLog с wrap=False прокручивается по горизонтали).
+        wide_console = Console(width=10000, height=1000, legacy_windows=False)
+        line = Text()
+        for segment in wide_console.render(table, wide_console.options):
+            text = segment.text
+            while "\n" in text:
+                part, text = text.split("\n", 1)
+                if part:
+                    line.append(part, style=segment.style)
+                log.write(line)
+                line = Text()
+            if text:
+                line.append(text, style=segment.style)
+        if line:
+            log.write(line)
         if not rows:
             log.write(f"[italic dim]{_('0 records')}[/italic dim]")
 
