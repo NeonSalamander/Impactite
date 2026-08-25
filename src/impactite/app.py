@@ -1182,6 +1182,7 @@ class BaseView(VerticalScroll):
         self._apply_generation: int = 0
         self._multi_select_values: dict[str, set] = {}
         self._multi_select_modes: dict[str, str] = {}
+        self._displayed_rows: list = []
 
     def compose(self) -> ComposeResult:
         yield Horizontal(id="base-filters")
@@ -1431,12 +1432,14 @@ class BaseView(VerticalScroll):
         """Отрисовать таблицу результатов."""
         log = self.query_one("#base-results", RichLog)
         log.clear()
+        self._displayed_rows = rows
 
         if not self._columns:
             log.write(f"[italic dim]{_('Query returned no data')}[/italic dim]")
             return
 
-        table = Table(expand=False, header_style="bold magenta", border_style="dim")
+        table = Table(expand=False, header_style="bold magenta", border_style="dim",
+                      show_lines=True)
         for col in self._columns:
             table.add_column(str(col))
         for row in rows:
@@ -1544,6 +1547,16 @@ class BaseView(VerticalScroll):
         self.set_timer(0.2, callback)
 
     def on_click(self, event: events.Click) -> None:
+        # Двойной клик по строке таблицы открывает соответствующую заметку
+        if event.chain >= 2:
+            log = self.query_one("#base-results", RichLog)
+            if event.widget is log:
+                offset = event.get_content_offset(log)
+                if offset is not None:
+                    x = offset.x + int(log.scroll_offset.x)
+                    y = offset.y + int(log.scroll_offset.y)
+                    self._open_note_at(log, x, y)
+            return
         widget = event.control
         if widget and widget.id:
             if widget.id.startswith("base-filter-reset-"):
@@ -1552,6 +1565,36 @@ class BaseView(VerticalScroll):
             elif widget.id.startswith("base-filter-mode-"):
                 name = widget.id[len("base-filter-mode-"):]
                 self._toggle_multi_select_mode(name)
+
+    def _open_note_at(self, log: RichLog, x: int, y: int) -> None:
+        """Открыть заметку, соответствующую строке таблицы под координатами."""
+        # show_lines=True: 0 — верхняя рамка, 1 — заголовок, 2 — разделитель,
+        # далее строки данных через одну (контент, разделитель).
+        if y < 3 or (y - 3) % 2 != 0:
+            return
+        row_idx = (y - 3) // 2
+        if row_idx >= len(self._displayed_rows):
+            return
+        row = self._displayed_rows[row_idx]
+        if y < len(log.lines):
+            line_text = log.lines[y].text
+            bounds = [i for i, ch in enumerate(line_text) if ch in "│┃"]
+            for i in range(len(bounds) - 1):
+                if bounds[i] < x < bounds[i + 1]:
+                    if i < len(self._columns):
+                        col_name = str(self._columns[i])
+                        value = str(row.get(col_name, "")).strip()
+                        # Поле url / значение-ссылка заметку не открывает
+                        if col_name.lower() == "url" or is_external_url(value):
+                            return
+                    break
+        rel = row.get("__path")
+        if not rel:
+            return
+        app = self.app
+        path = Path(app.file_system.root_path) / str(rel)
+        if path.exists():
+            app._navigate_to(path)
 
     def _reset_filter(self, name: str) -> None:
         for fd in self._filter_defs:

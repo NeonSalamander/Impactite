@@ -1375,6 +1375,12 @@ class QueryEngine:
             rows = rows[: q["limit"]]
 
         projected = [{c: self._fmt(r.get(c)) for c in columns} for r in rows]
+        # Скрытое поле с относительным путём к заметке — для навигации
+        # из BaseView (двойной клик по строке). Не входит в columns.
+        for out_row, src_row in zip(projected, rows):
+            rel_path = src_row.get("path")
+            if rel_path is not None:
+                out_row["__path"] = rel_path
         return columns, projected
 
     # ---- группировка и агрегаты -------------------------------------------
