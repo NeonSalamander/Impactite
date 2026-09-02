@@ -144,6 +144,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Directory color updated": "Цвет каталога обновлён",
         "Directory color reset": "Цвет каталога сброшен",
         "Color": "Цвет",
+        # TODO-панель
+        "Open todos": "Список задач",
+        "No open todos": "Нет открытых задач",
+        "Could not close todo": "Не удалось закрыть задачу",
     },
     "de": {
         # Виджеты / просмотр
@@ -268,6 +272,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Directory color updated": "Verzeichnisfarbe aktualisiert",
         "Directory color reset": "Verzeichnisfarbe zurückgesetzt",
         "Color": "Farbe",
+        # TODO-Panel
+        "Open todos": "Offene TODOs",
+        "No open todos": "Keine offenen TODOs",
+        "Could not close todo": "TODO konnte nicht geschlossen werden",
     },
 }
 

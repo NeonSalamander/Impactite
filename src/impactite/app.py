@@ -73,6 +73,7 @@ from impactite.core import (
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.table_engine import process_table_with_formulas
 from impactite.templater import build_context, collect_templates, render_template
+from impactite.todo_panel import TodoTree
 
 _log = logging.getLogger(__name__)
 
@@ -2462,6 +2463,7 @@ class MarkdownEditorApp(App):
         Binding("c", "set_directory_color", "Color", show=False),
         Binding("shift+c", "reset_directory_color", "Reset color", show=False),
         Binding("backspace", "go_back", "Back", show=False),
+        Binding("f4", "open_todos", "Open todos", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -2758,6 +2760,25 @@ class MarkdownEditorApp(App):
     }
 
     #graph-view Tree {
+        padding: 0 1;
+        height: 1fr;
+    }
+
+    #todos-panel {
+        display: none;
+        height: 1fr;
+        padding: 0;
+        background: $background;
+    }
+
+    #todos-tree {
+        display: none;
+        height: 1fr;
+        padding: 0;
+        background: $background;
+    }
+
+    #todos-tree Tree {
         padding: 0 1;
         height: 1fr;
     }
@@ -3261,6 +3282,7 @@ class MarkdownEditorApp(App):
                 yield FormView(id="form-view")
                 yield BaseView(id="base-view")
                 yield LinkGraphTree(id="graph-view")
+                yield TodoTree(self.file_system.root_path, id="todos-tree")
 
         yield Static("", id="status-bar")
         yield Footer()
@@ -3284,6 +3306,7 @@ class MarkdownEditorApp(App):
         self.query_one("#form-view", FormView).display = False
         self.query_one("#base-view", BaseView).display = False
         self.query_one("#graph-view", LinkGraphTree).display = False
+        self.query_one("#todos-tree", TodoTree).display = False
         self.query_one("#search-view", SearchView).display = False
         self._set_sidebar_mode("files")
         self._register_markdown_highlights(editor)
@@ -3692,17 +3715,9 @@ class MarkdownEditorApp(App):
         self.show_graph()
 
     def show_graph(self) -> None:
-        """Показать дерево связей и скрыть остальные панели."""
-        viewer = self.query_one("#viewer", MarkdownViewer)
-        editor_container = self.query_one("#editor-container")
-        form = self.query_one("#form-view", FormView)
-        base = self.query_one("#base-view", BaseView)
+        """Show the link graph and hide other main-area views."""
+        self._clear_main_area(exclude={"graph-view"})
         graph = self.query_one("#graph-view", LinkGraphTree)
-
-        viewer.display = False
-        editor_container.display = False
-        form.display = False
-        base.display = False
         graph.display = True
         graph.build_graph(
             self.tag_cache,
@@ -3713,6 +3728,38 @@ class MarkdownEditorApp(App):
         graph.focus()
         self.title = "Impactite — " + _("Link graph")
         self._update_status()
+
+    def show_todos(self) -> None:
+        """Show the open todos panel."""
+        self._clear_main_area(exclude={"todos-tree"})
+        tree = self.query_one("#todos-tree", TodoTree)
+        tree.display = True
+        tree.build()
+        tree.focus()
+        self.title = "Impactite — " + _("Open todos")
+        self._update_status()
+
+    def action_open_todos(self) -> None:
+        """Toggle the open todos panel."""
+        tree = self.query_one("#todos-tree", TodoTree)
+        if tree.display:
+            self._switch_to_view()
+        else:
+            self.show_todos()
+
+    def on_todo_tree_file_selected(self, event: TodoTree.FileSelected) -> None:
+        """Open the originating note from the todo tree."""
+        if event.path.exists() and event.path.is_file():
+            self._navigate_to(event.path)
+        else:
+            self.notify(_("File not found: {path}", path=str(event.path)), severity="error")
+
+    def on_todo_tree_todo_closed(self, event: TodoTree.TodoClosed) -> None:
+        """Refresh the todo tree after a todo was closed."""
+        tree = self.query_one("#todos-tree", TodoTree)
+        tree.remove_todo(event.item.id)
+        self._rebuild_tag_cache()
+        self._update_tag_cloud()
 
     def on_link_graph_tree_note_selected(self, event: LinkGraphTree.NoteSelected) -> None:
         """Открыть заметку из дерева связей."""
@@ -4277,20 +4324,27 @@ class MarkdownEditorApp(App):
             done,
         )
 
-    def _clear_main_area(self) -> None:
-        """Очистить основную область (просмотр / редактор / форма / база / граф)."""
-        viewer = self.query_one("#viewer", MarkdownViewer)
-        editor_container = self.query_one("#editor-container")
-        form = self.query_one("#form-view", FormView)
-        base = self.query_one("#base-view", BaseView)
-        graph = self.query_one("#graph-view", LinkGraphTree)
-        viewer.display = False
-        editor_container.display = False
-        form.display = False
-        base.display = False
-        graph.display = False
-        self.title = "Impactite"
-        self._update_status()
+    def _clear_main_area(self, exclude: set[str] | None = None) -> None:
+        """Hide main-area views; keep ids listed in ``exclude``."""
+        exclude = exclude or set()
+        targets = {
+            "#viewer": MarkdownViewer,
+            "#editor-container": Vertical,
+            "#form-view": FormView,
+            "#base-view": BaseView,
+            "#graph-view": LinkGraphTree,
+            "#todos-tree": TodoTree,
+        }
+        for selector, widget_type in targets.items():
+            if selector[1:] in exclude:
+                continue
+            try:
+                self.query_one(selector, widget_type).display = False
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
+        if not exclude:
+            self.title = "Impactite"
+            self._update_status()
 
     def action_toggle_sidebar(self):
         """Показать/скрыть боковую панель."""
