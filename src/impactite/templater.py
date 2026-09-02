@@ -34,29 +34,26 @@
 Вложенные папки группируют шаблоны по категориям.
 """
 
-import os
 import random
 import re
-from datetime import datetime, date
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
-
 
 # ---- нативные функции для Jinja2 окружения (доступны из шаблонов) ----------
 
 def _format_date(fmt: str = "%Y-%m-%d") -> str:
     """Вернуть сегодняшнюю дату в заданном формате strftime."""
-    return date.today().strftime(fmt)
+    return datetime.now(timezone.utc).date().strftime(fmt)
 
 
 def _format_time(fmt: str = "%H:%M") -> str:
     """Вернуть текущее время в заданном формате strftime."""
-    return datetime.now().strftime(fmt)
+    return datetime.now(timezone.utc).strftime(fmt)
 
 
 def _random_int() -> int:
     """Вернуть случайное число 0–99999."""
-    return random.randint(0, 99999)
+    return random.randint(0, 99999)  # nosec B311
 
 
 _CONVERTIBLE = {
@@ -86,13 +83,15 @@ def _convert_readable_format(fmt: str) -> str:
     return result
 
 
-def _uptime(creation_str: Optional[str] = None) -> str:
+def _uptime(creation_str: str | None = None) -> str:
     """Вернуть время с момента создания файла."""
     if not creation_str:
         return ""
     try:
         created = datetime.fromisoformat(creation_str)
-        delta = datetime.now() - created
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - created
         parts = []
         if delta.days > 0:
             parts.append(f"{delta.days}d")
@@ -109,13 +108,13 @@ def _uptime(creation_str: Optional[str] = None) -> str:
 
 # ---- сканирование шаблонов ------------------------------------------------
 
-def collect_templates(templates_dir: Path) -> Dict[str, Path]:
+def collect_templates(templates_dir: Path) -> dict[str, Path]:
     """Собрать все .md шаблоны из директории и вложенных папок.
 
     Возвращает {имя_шаблона: Path} — имена уникальные,
     при конфликте побеждает первый найденный (по алфавитному порядку папок).
     """
-    templates: Dict[str, Path] = {}
+    templates: dict[str, Path] = {}
     if not templates_dir.is_dir():
         return templates
     # Рекурсивный обход, сортировка путей для детерминизма
@@ -129,13 +128,13 @@ def collect_templates(templates_dir: Path) -> Dict[str, Path]:
 # ---- построение контекста -------------------------------------------------
 
 def build_context(
-    filepath: Optional[Path] = None,
-    title: Optional[str] = None,
+    filepath: Path | None = None,
+    title: str | None = None,
     author: str = "",
-    created_at: Optional[str] = None,
-    modified_at: Optional[str] = None,
-    todo_list: Optional[list] = None,
-    specials: Optional[Dict[str, str]] = None,
+    created_at: str | None = None,
+    modified_at: str | None = None,
+    todo_list: list | None = None,
+    specials: dict[str, str] | None = None,
 ) -> dict:
     """Собрать словарь-контекст для рендера шаблона.
 
@@ -151,8 +150,8 @@ def build_context(
     Returns:
         Словарь, который можно передать в Template.render().
     """
-    now = datetime.now()
-    today_dt = date.today()
+    now = datetime.now(timezone.utc)
+    today_dt = datetime.now(timezone.utc).date()
 
     # Имя файла без расширения
     if title is None and filepath is not None:
@@ -207,7 +206,7 @@ def render_template(
     Returns:
         Отрендеренный текст.
     """
-    from jinja2 import Environment, BaseLoader, TemplateNotFound, StrictUndefined
+    from jinja2 import BaseLoader, Environment, StrictUndefined, TemplateNotFound
 
     # Кастомный загрузчик, который разрешает встроенные фильтры date/time
     class _FilterLoader(BaseLoader):
@@ -216,7 +215,7 @@ def render_template(
 
     env = Environment(
         loader=_FilterLoader(),
-        undefined=StrictUndefined,
+        undefined=StrictUndefined,  # nosec B701
         autoescape=False,
     )
 
@@ -226,7 +225,7 @@ def render_template(
     # где фильтр игнорирует вход и возвращает отформатированную дату.
     def _fmt_filter(fmt_func, *args, **kwargs):
         # Игнорируем значение (оно пришло от переменной перед |)
-        return fmt_func(str(list(args)[0]) if args else "%Y-%m-%d")
+        return fmt_func(str(next(iter(args))) if args else "%Y-%m-%d")
 
     def _fmt_date_filter(value, fmt="%Y-%m-%d"):
         # Поддержка читаемых форматов (DD → %d, MM → %m, YYYY → %Y, YY → %y)

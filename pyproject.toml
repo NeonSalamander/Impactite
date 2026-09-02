@@ -16,7 +16,34 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = []
+dev = [
+    "bandit>=1.9.4",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+# BLE001 flags every ``except Exception:`` as a "blind" catch. Impactite uses
+# intentional catch-all handlers at UI/event boundaries so a single malformed
+# note, missing widget, or rendering failure cannot crash the TUI. Breaking
+# these out into specific exception types across the entire codebase would be a
+# large refactor and would not meaningfully improve safety here.
+# the Python version targeted by the project does not yet expose `timezone.UTC`
+# in the type stubs, so keep using `timezone.utc`.
+ignore = ["BLE001", "UP017"]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
 
 [project.scripts]
 impactite = "impactite.app:main"

@@ -3,25 +3,32 @@
 Консольный аналог Obsidian с использованием Textual и Rich.
 """
 
+import logging
 import re
-from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Any, Tuple
+from typing import Any, ClassVar
 
+from rich.color import Color
 from rich.console import Console
 from rich.markup import escape
 from rich.style import Style
-from rich.color import Color
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.containers import (
+    Container,
+    Grid,
+    Horizontal,
+    Vertical,
+    VerticalScroll,
+)
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     Footer,
@@ -39,18 +46,35 @@ from textual.widgets import (
     TextArea,
     Tree,
 )
+from textual.widgets._select import NoSelection
 from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
-from textual.widgets._select import NoSelection
 
 from impactite.core import (
-    Config, DirectoryStyle, FileNode, FileSystem, FullTextIndex, MarkdownParser, Match, OpenUrlError, QueryEngine, SearchState, TagIndex,
-    find_external_links, find_matches, is_external_url, location_after_frontmatter, open_url, parse_form_definition, parse_base_definition,
+    Config,
+    DirectoryStyle,
+    FileNode,
+    FileSystem,
+    FullTextIndex,
+    MarkdownParser,
+    OpenUrlError,
+    QueryEngine,
+    SearchState,
+    TagIndex,
+    find_external_links,
+    find_matches,
+    is_external_url,
+    location_after_frontmatter,
+    open_url,
+    parse_base_definition,
+    parse_form_definition,
     resolve_theme_variant,
 )
 from impactite.i18n import _, retranslate_bindings, set_language
-from impactite.templater import collect_templates, build_context, render_template
 from impactite.table_engine import process_table_with_formulas
+from impactite.templater import build_context, collect_templates, render_template
+
+_log = logging.getLogger(__name__)
 
 _LIGHT_THEMES: frozenset[str] = frozenset({
     "textual-light", "solarized-light", "catppuccin-latte",
@@ -104,7 +128,7 @@ class TagCloud(ListView):
             self.tag = tag
             super().__init__()
 
-    def update_tags(self, tags: Dict[str, int], colors: Dict[str, str] = None) -> None:
+    def update_tags(self, tags: dict[str, int], colors: dict[str, str] | None = None) -> None:
         self.clear()
         if not tags:
             self.append(ListItem(Label(f"[dim]{_('No tags')}[/dim]"), name=""))
@@ -150,7 +174,6 @@ class FileTree(Tree):
     class GraphSelected(Message):
         """Сообщение о выборе графа связей."""
 
-        pass
 
     class DirectoryContextMenuRequested(Message):
         """Сообщение о запросе контекстного меню для каталога."""
@@ -163,13 +186,13 @@ class FileTree(Tree):
 
     def __init__(self, root_label: str, **kwargs):
         super().__init__(root_label, **kwargs)
-        self.directory_styles: Dict[str, DirectoryStyle] = {}
-        self.file_nodes: Dict[int, Path] = {}
-        self.dir_nodes: Dict[int, Path] = {}
-        self.root_path: Optional[Path] = None
+        self.directory_styles: dict[str, DirectoryStyle] = {}
+        self.file_nodes: dict[int, Path] = {}
+        self.dir_nodes: dict[int, Path] = {}
+        self.root_path: Path | None = None
         # Текущий выбранный каталог (для создания заметок/папок)
-        self.selected_dir: Optional[Path] = None
-        self.graph_node_id: Optional[int] = None
+        self.selected_dir: Path | None = None
+        self.graph_node_id: int | None = None
         self.show_root = False
         # Выбор узла не должен сворачивать/разворачивать каталог.
         self.auto_expand = False
@@ -177,8 +200,8 @@ class FileTree(Tree):
     def populate_tree(
         self,
         file_system: FileSystem,
-        directory_styles: Optional[Dict[str, DirectoryStyle]] = None,
-        favorites: Optional[List[str]] = None,
+        directory_styles: dict[str, DirectoryStyle] | None = None,
+        favorites: list[str] | None = None,
     ):
         """Заполнить дерево файлами, сохраняя развёрнутость каталогов."""
         expanded_paths = self._collect_expanded_dir_paths()
@@ -197,7 +220,7 @@ class FileTree(Tree):
         self.graph_node_id = id(graph_node)
 
         if favorites:
-            existing: List[Path] = []
+            existing: list[Path] = []
             for f in favorites:
                 fp = Path(f).resolve()
                 if fp.exists():
@@ -212,9 +235,9 @@ class FileTree(Tree):
         self._add_nodes(self.root, tree)
         self._restore_expansion(expanded_paths, selected_path)
 
-    def _collect_expanded_dir_paths(self) -> Set[Path]:
+    def _collect_expanded_dir_paths(self) -> set[Path]:
         """Собрать пути каталогов, узлы которых сейчас развёрнуты."""
-        paths: Set[Path] = set()
+        paths: set[Path] = set()
         for node in self._walk_tree_nodes(self.root):
             if node.is_expanded and isinstance(node.data, Path):
                 paths.add(node.data)
@@ -226,9 +249,9 @@ class FileTree(Tree):
         for child in node.children:
             yield from self._walk_tree_nodes(child)
 
-    def _ancestor_paths(self, path: Path) -> Set[Path]:
+    def _ancestor_paths(self, path: Path) -> set[Path]:
         """Вернуть все пути от корня заметок до ``path`` включительно."""
-        paths: Set[Path] = set()
+        paths: set[Path] = set()
         if not self.root_path:
             return paths
         try:
@@ -241,9 +264,9 @@ class FileTree(Tree):
             paths.add(current)
         return paths
 
-    def _restore_expansion(self, expanded_paths: Set[Path], selected_path: Optional[Path]) -> None:
+    def _restore_expansion(self, expanded_paths: set[Path], selected_path: Path | None) -> None:
         """Развернуть ранее развёрнутые и выбранные каталоги после перестроения дерева."""
-        paths_to_expand: Set[Path] = set()
+        paths_to_expand: set[Path] = set()
         for path in expanded_paths:
             paths_to_expand.update(self._ancestor_paths(path))
         if selected_path:
@@ -263,7 +286,7 @@ class FileTree(Tree):
             # selection instead of moving the cursor immediately.
             self.call_after_refresh(self.select_node, selected_node)
 
-    def current_dir(self) -> Optional[Path]:
+    def current_dir(self) -> Path | None:
         """Каталог, в котором создавать новые заметки/папки."""
         return self.selected_dir or self.root_path
 
@@ -279,7 +302,7 @@ class FileTree(Tree):
                 node = parent_node.add(f"{icon} {child.name}")
                 self.file_nodes[id(node)] = child.path
 
-    def _directory_style_for_node(self, node: Any) -> Optional[DirectoryStyle]:
+    def _directory_style_for_node(self, node: Any) -> DirectoryStyle | None:
         """Найти сохранённый стиль для узла-каталога."""
         if not self.directory_styles or not self.root_path:
             return None
@@ -298,8 +321,8 @@ class FileTree(Tree):
             try:
                 text = text.copy()
                 text.stylize(Style(color=Color.parse(style_data.text)))
-            except Exception:
-                pass
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
         return text
 
     def _render_line(self, y: int, x1: int, x2: int, base_style: Style) -> Any:
@@ -309,8 +332,8 @@ class FileTree(Tree):
             if style_data and style_data.background:
                 try:
                     base_style = base_style + Style(bgcolor=Color.parse(style_data.background))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    _log.debug("Suppressed exception", exc_info=_exc)
         return super()._render_line(y, x1, x2, base_style)
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
@@ -409,8 +432,8 @@ class EditorToolbar(Horizontal):
         try:
             editor = self.screen.query_one("#editor", TextArea)
             saved_selection = editor.selection
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
         self.post_message(self.Action(action, saved_selection))
 
 
@@ -432,7 +455,7 @@ class MarkdownViewer(Static):
 
     can_focus = True
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("up",       "scroll_up",   show=False),
         Binding("down",     "scroll_down", show=False),
         Binding("pageup",   "page_up",     show=False),
@@ -517,10 +540,9 @@ class MarkdownViewer(Static):
         # Чекбокс?
         if line_idx < len(self._checkbox_lines):
             cb_info = self._checkbox_lines[line_idx]
-            if cb_info:
-                if cb_info["cb_start"] <= col <= cb_info["cb_end"]:
-                    self.post_message(self.CheckboxToggled(cb_info["source_line"]))
-                    return
+            if cb_info and cb_info["cb_start"] <= col <= cb_info["cb_end"]:
+                self.post_message(self.CheckboxToggled(cb_info["source_line"]))
+                return
 
         entry = self._tag_lines[line_idx]
         if not entry:
@@ -541,7 +563,7 @@ class MarkdownViewer(Static):
     def update_content(
         self,
         content: str,
-        search_terms: Optional[List[str]] = None,
+        search_terms: list[str] | None = None,
         current_match_index: int = 0,
     ):
         """Обновить содержимое.
@@ -551,7 +573,7 @@ class MarkdownViewer(Static):
         self._content = content
         self._search_terms = search_terms or []
         self._current_match_index = current_match_index
-        self._line_highlights: Dict[int, List[Tuple[int, int, bool]]] = {}
+        self._line_highlights: dict[int, list[tuple[int, int, bool]]] = {}
         self._tag_lines = []
         self._checkbox_lines = []
         self._link_lines = []
@@ -569,7 +591,7 @@ class MarkdownViewer(Static):
 
         lines = content.split("\n")
         self._line_highlights = self._find_highlights(lines, self._search_terms, current_match_index)
-        self._current_match_line: Optional[int] = None
+        self._current_match_line: int | None = None
         for lnum, hls in self._line_highlights.items():
             if any(is_current for _, _, is_current in hls):
                 self._current_match_line = lnum
@@ -679,7 +701,7 @@ class MarkdownViewer(Static):
                 self._link_lines.append(None)
                 self._external_link_lines.append(None)
             # Списки
-            elif line.startswith("- ") or line.startswith("* "):
+            elif line.startswith(("- ", "* ")):
                 text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
                 log.write(f"  • {text}")
                 offset = 4
@@ -776,8 +798,8 @@ class MarkdownViewer(Static):
         if self._current_match_line is not None:
             try:
                 log.scroll_to(0, max(0, self._current_match_line - 2))
-            except Exception:
-                pass
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
 
     def _render_table(self, log, table, lines, start_idx) -> None:
         """Отрендерить MarkdownTable в RichLog через rich.table.Table."""
@@ -793,8 +815,8 @@ class MarkdownViewer(Static):
             pos = line.find(raw)
             return max(pos + leading, 0)
 
-        def _source_indices() -> List[int]:
-            indices: List[int] = []
+        def _source_indices() -> list[int]:
+            indices: list[int] = []
             i = start_idx
             while i < len(lines) and lines[i].strip().startswith("|"):
                 cells_raw = [c.strip() for c in lines[i].strip()[1:].split("|")]
@@ -931,17 +953,17 @@ class MarkdownViewer(Static):
 
     def _find_highlights(
         self,
-        lines: List[str],
-        terms: List[str],
+        lines: list[str],
+        terms: list[str],
         current_idx: int,
-    ) -> Dict[int, List[Tuple[int, int, bool]]]:
+    ) -> dict[int, list[tuple[int, int, bool]]]:
         """Найти позиции терминов для каждой строки и отметить текущее совпадение."""
         if not terms:
             return {}
         # Сначала длинные термины, чтобы частичные совпадения не блокировали длинные
         escaped = [re.escape(t) for t in sorted(terms, key=len, reverse=True)]
         pattern = re.compile("|".join(escaped), re.IGNORECASE)
-        highlights: Dict[int, List[Tuple[int, int, bool]]] = {}
+        highlights: dict[int, list[tuple[int, int, bool]]] = {}
         idx = 0
         for lnum, line in enumerate(lines):
             hl = []
@@ -976,7 +998,7 @@ class MarkdownViewer(Static):
         parts.append(text[pos:])
         return "".join(parts)
 
-    def _render_query_block(self, log: "ViewerLog", query_text: str) -> int:
+    def _render_query_block(self, log: ViewerLog, query_text: str) -> int:
         """Выполнить псевдо-SQL запрос и отрендерить результат таблицей.
 
         Возвращает примерную высоту отрисованного блока (в строках).
@@ -1022,7 +1044,7 @@ class BacklinksPanel(Vertical):
         yield Label(f"[bold]{_('Linked references')}[/bold]", id="backlinks-title")
         yield ListView(id="backlinks-list")
 
-    def set_backlinks(self, paths: List[Path], root: Path) -> None:
+    def set_backlinks(self, paths: list[Path], root: Path) -> None:
         """Заполнить список; панель скрывается, когда обратных ссылок нет."""
         list_view = self.query_one("#backlinks-list", ListView)
         list_view.clear()
@@ -1043,7 +1065,7 @@ class BacklinksPanel(Vertical):
 class FormView(VerticalScroll):
     """Отображает заметку типа 'form' как интерактивную форму ввода данных."""
 
-    BINDINGS = [Binding("ctrl+s", "save_form", "Save", show=False)]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("ctrl+s", "save_form", "Save", show=False)]
 
     class Saved(Message):
         def __init__(self, catalog: str, destination: str, values: dict) -> None:
@@ -1092,7 +1114,7 @@ class FormView(VerticalScroll):
             await container.mount(*widgets)
         self.scroll_home(animate=False)
 
-    def _make_input(self, name: str, info: list) -> "Widget":
+    def _make_input(self, name: str, info: list) -> Widget:
         wid = f"field-{name}"
         ftype = str(info[1]).lower()
         if ftype == "boolean":
@@ -1504,8 +1526,8 @@ class BaseView(VerticalScroll):
             display = self.query_one(f"#base-filter-{name}-display", Static)
             selected = sorted(self._multi_select_values.get(name, []))
             display.update(Text(", ".join(selected), style="yellow") if selected else "")
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def _refresh_select_options(self, name: str) -> None:
         """Обновить цвета опций Select: выбранные — жёлтые."""
@@ -1520,8 +1542,8 @@ class BaseView(VerticalScroll):
                 else:
                     new_options.append((str(label), val))
             sel.set_options(new_options)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def _toggle_multi_select_mode(self, name: str) -> None:
         """Переключить режим фильтрации multi-select между OR и AND."""
@@ -1531,8 +1553,8 @@ class BaseView(VerticalScroll):
         try:
             btn = self.query_one(f"#base-filter-mode-{name}", Static)
             btn.update(new_mode)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
         self._apply_filters()
 
     def _schedule_apply(self) -> None:
@@ -1614,14 +1636,14 @@ class BaseView(VerticalScroll):
                     try:
                         display = self.query_one(f"#base-filter-{name}-display", Static)
                         display.update("")
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        _log.debug("Suppressed exception", exc_info=_exc)
                     try:
                         sel = self.query_one(f"#base-filter-{name}", Select)
                         sel.value = Select.NULL
                         self._refresh_select_options(name)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        _log.debug("Suppressed exception", exc_info=_exc)
                 elif ftype == "integer":
                     self.query_one(f"#base-filter-{name}-min", Input).value = ""
                     self.query_one(f"#base-filter-{name}-max", Input).value = ""
@@ -1630,8 +1652,8 @@ class BaseView(VerticalScroll):
                     self.query_one(f"#base-filter-{name}-to", Input).value = ""
                 else:
                     self.query_one(f"#base-filter-{name}", Input).value = ""
-            except Exception:
-                pass
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
             break
         self._apply_filters()
 
@@ -1652,17 +1674,17 @@ class LinkGraphTree(Tree):
     def __init__(self, **kwargs):
         super().__init__("", **kwargs)
         self.show_root = False
-        self._tag_cache: Dict[str, List[Path]] = {}
-        self._tag_colors: Dict[str, str] = {}
-        self._note_links: Dict[Path, Set[Path]] = {}
-        self._all_md_files: Set[Path] = set()
+        self._tag_cache: dict[str, list[Path]] = {}
+        self._tag_colors: dict[str, str] = {}
+        self._note_links: dict[Path, set[Path]] = {}
+        self._all_md_files: set[Path] = set()
 
     def build_graph(
         self,
-        tag_cache: Dict[str, List[Path]],
-        tag_colors: Dict[str, str],
-        note_links: Dict[Path, Set[Path]],
-        all_md_files: List[Path],
+        tag_cache: dict[str, list[Path]],
+        tag_colors: dict[str, str],
+        note_links: dict[Path, set[Path]],
+        all_md_files: list[Path],
     ) -> None:
         """Построить иерархическое дерево связей."""
         self.clear()
@@ -1676,24 +1698,24 @@ class LinkGraphTree(Tree):
             return
 
         # Собираем обратные связи: кто ссылается на заметку
-        back_links: Dict[Path, Set[Path]] = {}
+        back_links: dict[Path, set[Path]] = {}
         for src, targets in note_links.items():
             for t in targets:
                 back_links.setdefault(t, set()).add(src)
 
         # Тег -> заметки
-        tag_to_notes: Dict[str, Set[Path]] = {}
+        tag_to_notes: dict[str, set[Path]] = {}
         for tag, files in tag_cache.items():
             tag_to_notes.setdefault(tag, set()).update(files)
 
         # Заметка -> теги
-        note_to_tags: Dict[Path, Set[str]] = {}
+        note_to_tags: dict[Path, set[str]] = {}
         for tag, files in tag_cache.items():
             for f in files:
                 note_to_tags.setdefault(f, set()).add(tag)
 
-        visited_notes: Set[Path] = set()
-        visited_tags: Set[str] = set()
+        visited_notes: set[Path] = set()
+        visited_tags: set[str] = set()
 
         def add_note(parent, note: Path, depth: int = 0):
             if note in visited_notes or depth > 10:
@@ -1739,9 +1761,8 @@ class LinkGraphTree(Tree):
 
         # Заметки без тегов, но со ссылками
         for note in sorted(all_md_files):
-            if note not in visited_notes:
-                if note in self._note_links or note in back_links:
-                    add_note(self.root, note)
+            if note not in visited_notes and (note in self._note_links or note in back_links):
+                add_note(self.root, note)
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
@@ -1773,7 +1794,8 @@ class LeftRibbon(Vertical):
         for btn_id, m in (("files-mode-btn", "files"), ("search-mode-btn", "search")):
             try:
                 btn = self.query_one(f"#{btn_id}", ToolButton)
-            except Exception:
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
                 continue
             if m == mode:
                 btn.add_class("active")
@@ -1837,7 +1859,7 @@ class SearchView(Vertical):
             yield next_btn
             yield Label("", id="search-match-status")
 
-    def set_results(self, results: List[Dict[str, Any]], total_found: int) -> None:
+    def set_results(self, results: list[dict[str, Any]], total_found: int) -> None:
         """Заполнить дерево результатов."""
         tree = self.query_one("#search-results-tree", SearchResultsTree)
         tree.clear()
@@ -1870,8 +1892,8 @@ class SearchView(Vertical):
     def set_query(self, value: str) -> None:
         try:
             self.query_one("#search-input", Input).value = value
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def on_search_results_tree_file_selected(self, event: SearchResultsTree.FileSelected) -> None:
         self.post_message(self.FileSelected(event.path))
@@ -1889,7 +1911,7 @@ class SearchView(Vertical):
 class InNoteSearch(ModalScreen):
     """Модальный диалог поиска по текущей заметке."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "close", "Close", priority=True),
         Binding("f3", "next", "Next result", priority=True),
         Binding("shift+f3", "prev", "Prev result", priority=True),
@@ -2003,20 +2025,20 @@ class InNoteSearch(ModalScreen):
 class TagSearchModal(ModalScreen):
     """Модальное окно поиска по тегам."""
 
-    BINDINGS = [Binding("escape", "close", "Close")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "close", "Close")]
 
     class FileSelected(Message):
         def __init__(self, path: Path):
             self.path = path
             super().__init__()
 
-    def __init__(self, all_tags: Dict[str, List[Path]], initial_query: str = "",
-                 tag_colors: Dict[str, str] = None, **kwargs):
+    def __init__(self, all_tags: dict[str, list[Path]], initial_query: str = "",
+                 tag_colors: dict[str, str] | None = None, **kwargs):
         super().__init__(**kwargs)
         self.all_tags = all_tags
         self.initial_query = initial_query
         self.tag_colors = tag_colors or {}
-        self.current_results: List[tuple] = []
+        self.current_results: list[tuple] = []
 
     def on_mount(self) -> None:
         if self.initial_query:
@@ -2078,7 +2100,7 @@ class TagSearchModal(ModalScreen):
 class UnsavedChangesModal(ModalScreen):
     """Диалог несохранённых изменений."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "discard",      "Don't save"),
         Binding("left",   "prev_button",  show=False),
         Binding("right",  "next_button",  show=False),
@@ -2123,13 +2145,13 @@ class UnsavedChangesModal(ModalScreen):
         self.dismiss()
 
 
-class TextPromptModal(ModalScreen[Optional[str]]):
+class TextPromptModal(ModalScreen[str | None]):
     """Модальное окно ввода одной строки (имя каталога / заметки).
 
     Закрывается через ``dismiss`` с введённой строкой (или ``None`` при отмене).
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, title: str, placeholder: str = "", initial: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
@@ -2160,7 +2182,7 @@ class TextPromptModal(ModalScreen[Optional[str]]):
 class ConfirmModal(ModalScreen[bool]):
     """Модальное окно подтверждения да/нет."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("enter", "confirm", "Confirm"),
         Binding("escape", "cancel", "Cancel"),
         Binding("y", "confirm", "Confirm", show=False),
@@ -2187,7 +2209,7 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class DirectoryColorModal(ModalScreen[Optional[Tuple[str, str]]]):
+class DirectoryColorModal(ModalScreen[tuple[str, str] | None]):
     """Модальное окно выбора фона и цвета текста для каталога."""
 
     class _ColorInput(Input):
@@ -2202,14 +2224,14 @@ class DirectoryColorModal(ModalScreen[Optional[Tuple[str, str]]]):
             if self.id is not None:
                 self.post_message(self.Focused(self.id))
 
-    _COLOR_PRESETS: List[str] = [
+    _COLOR_PRESETS: ClassVar[list[str]] = [
         "#000000", "#ffffff", "#808080", "#ff0000",
         "#00ff00", "#0000ff", "#ffff00", "#ff00ff",
         "#00ffff", "#8b0000", "#006400", "#00008b",
         "#ffa500", "#800080", "#008080", "#ffc0cb",
     ]
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, title: str, background: str = "", text: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
@@ -2286,7 +2308,7 @@ class DirectoryContextMenu(Container):
     """Контекстное меню для каталога в дереве файлов."""
 
     can_focus = True
-    BINDINGS = [Binding("escape", "dismiss", "Dismiss", show=False)]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "dismiss", "Dismiss", show=False)]
 
     class ActionChosen(Message):
         """Сообщение о выбранном действии в контекстном меню."""
@@ -2328,21 +2350,20 @@ class DirectoryContextMenu(Container):
             self.remove()
 
 
-class TemplateSelectModal(ModalScreen[Optional[str]]):
+class TemplateSelectModal(ModalScreen[str | None]):
     """Модальное окно выбора шаблона для создания заметки.
 
     Показывает список доступных шаблонов из ``templates_path``.
     Закрывается с именем шаблона (stem файла) или None при отмене.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, templates_dir: Path, **kwargs) -> None:
         super().__init__(**kwargs)
         self._templates = collect_templates(templates_dir)
         self._items: list[tuple[str, str, str]] = []
         for name, fp in self._templates.items():
-            parent = fp.parent.name
             rel = fp.relative_to(templates_dir).parent
             category = str(rel).replace(".", "") if str(rel) != "." else ""
             self._items.append((name, str(fp.stem), category))
@@ -2421,7 +2442,7 @@ class MarkdownEditorApp(App):
 
     TITLE = "Impactite"
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+s", "save", "Save"),
         Binding("e", "toggle_edit", "Edit"),
@@ -3043,16 +3064,16 @@ class MarkdownEditorApp(App):
         if effective_theme != user_theme:
             self.config.save_user_theme(effective_theme)
 
-        self.current_file: Optional[Path] = None
+        self.current_file: Path | None = None
         self.is_edit_mode = False
         self.sidebar_visible = True
         self.sidebar_mode = "files"  # "files" | "search"
-        self.tag_cache: Dict[str, List[Path]] = {}
-        self.tag_colors: Dict[str, str] = {}
-        self.note_links: Dict[Path, Set[Path]] = {}
+        self.tag_cache: dict[str, list[Path]] = {}
+        self.tag_colors: dict[str, str] = {}
+        self.note_links: dict[Path, set[Path]] = {}
         self._original_content: str = ""
         self._last_editor_selection = None
-        self._file_history: List[Path] = []
+        self._file_history: list[Path] = []
         self._return_to_graph: bool = False
         self.tag_index = TagIndex(self.file_system.root_path)
         self.fts_index = FullTextIndex(self.file_system.root_path)
@@ -3061,14 +3082,14 @@ class MarkdownEditorApp(App):
 
         # Полнотекстовый поиск
         self._search_query: str = ""
-        self._search_terms: List[str] = []
-        self._search_matches: List[Tuple[int, int, int]] = []
+        self._search_terms: list[str] = []
+        self._search_matches: list[tuple[int, int, int]] = []
         self._current_match_index: int = 0
-        self._search_results: List[Dict[str, Any]] = []
+        self._search_results: list[dict[str, Any]] = []
 
         # Поиск по текущей заметке
         self._in_note_search: SearchState = SearchState()
-        self._in_note_search_global_backup: Optional[Dict[str, Any]] = None
+        self._in_note_search_global_backup: dict[str, Any] | None = None
 
     def _rebuild_tag_cache(self):
         """Обновить SQLite-индекс и перезагрузить кэш тегов, цветов и связей."""
@@ -3112,7 +3133,7 @@ class MarkdownEditorApp(App):
         target = file_tree.selected_dir or self.file_system.root_path
         self._open_directory_color_for(target)
 
-    def _open_directory_color_for(self, target: Optional[Path]) -> None:
+    def _open_directory_color_for(self, target: Path | None) -> None:
         if not target or not self.file_system:
             self.notify(_("No directory selected"), severity="warning")
             return
@@ -3157,7 +3178,7 @@ class MarkdownEditorApp(App):
 
 
     def _on_color_chosen(
-        self, result: Optional[Tuple[str, str]], rel: str
+        self, result: tuple[str, str] | None, rel: str
     ) -> None:
         """Применить цвета из модалки к каталогу."""
         if not result:
@@ -3289,8 +3310,8 @@ class MarkdownEditorApp(App):
                 try:
                     inp = search_view.query_one("#search-input", Input)
                     self.set_focus(inp)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    _log.debug("Suppressed exception", exc_info=_exc)
             self.call_after_refresh(_focus_input)
 
     def on_left_ribbon_mode_changed(self, event: LeftRibbon.ModeChanged) -> None:
@@ -3349,8 +3370,8 @@ class MarkdownEditorApp(App):
                 self.query_one("#editor", TextArea).focus()
             elif viewer.display:
                 viewer.focus()
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def _close_in_note_search(self) -> None:
         """Закрыть модальный диалог поиска по заметке, если он активен."""
@@ -3541,14 +3562,6 @@ class MarkdownEditorApp(App):
         self._current_match_index = (self._current_match_index - 1) % len(self._search_matches)
         self._apply_current_match()
 
-    def action_search_next(self) -> None:
-        """Следующее совпадение (F3)."""
-        self._search_next()
-
-    def action_search_prev(self) -> None:
-        """Предыдущее совпадение (Shift+F3)."""
-        self._search_prev()
-
     def on_search_view_file_selected(self, event: SearchView.FileSelected) -> None:
         """Открыть файл из результатов поиска."""
         self._return_to_graph = False
@@ -3607,8 +3620,9 @@ class MarkdownEditorApp(App):
     def _register_markdown_highlights(self, editor: TextArea) -> None:
         """Кастомный highlight-запрос: код в блоках окрашивается как строки."""
         try:
-            import textual as _tx
             from pathlib import Path
+
+            import textual as _tx
             from textual._tree_sitter import get_language
 
             query_path = (
@@ -3622,8 +3636,9 @@ class MarkdownEditorApp(App):
             # имя языка после ``` подсвечиваем как keyword
             query += "\n(fenced_code_block (info_string (language) @keyword))\n"
             editor.register_language("markdown", get_language("markdown"), query)
-        except Exception:
-            pass  # дефолтная подсветка останется
+        except Exception as _exc:
+            _log.debug("Failed to register markdown language", exc_info=_exc)
+            # дефолтная подсветка останется
 
     def _update_tag_cloud(self):
         """Обновить облако тегов."""
@@ -3789,25 +3804,6 @@ class MarkdownEditorApp(App):
         else:
             search_view.update_match_status(0, 0)
 
-    def action_toggle_edit(self):
-        """Переключить режим редактирования."""
-        if not self.current_file:
-            return
-
-        # При выходе из редактора — сохранить изменения
-        if self.is_edit_mode:
-            editor = self.query_one("#editor", TextArea)
-            if editor.text != self._original_content:
-                self.file_system.write_file(self.current_file, editor.text)
-                self._rebuild_tag_cache()
-                self._update_tag_cloud()
-
-        self.is_edit_mode = not self.is_edit_mode
-        # _load_file сам выберет режим: форма / просмотр / редактор
-        self._load_file()
-        if self.is_edit_mode:
-            self.query_one("#editor", TextArea).focus()
-
     def action_save(self):
         """Сохранить файл."""
         if not self.current_file:
@@ -3919,8 +3915,8 @@ class MarkdownEditorApp(App):
             sel = editor.selection
             if sel and not sel.is_empty:
                 self._last_editor_selection = sel
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def on_editor_toolbar_action(self, event: EditorToolbar.Action) -> None:
         """Обработать нажатие кнопки панели инструментов редактора."""
@@ -4044,7 +4040,7 @@ class MarkdownEditorApp(App):
         """Запросить имя и создать каталог в выбранной папке."""
         catalog = self._current_catalog()
 
-        def done(name: Optional[str]) -> None:
+        def done(name: str | None) -> None:
             if not name:
                 return
             target = catalog / name
@@ -4060,7 +4056,7 @@ class MarkdownEditorApp(App):
         """Запросить имя, создать заметку в выбранной папке и открыть в редакторе."""
         catalog = self._current_catalog()
 
-        def done(name: Optional[str]) -> None:
+        def done(name: str | None) -> None:
             if not name:
                 return
             if not name.endswith(".md"):
@@ -4088,9 +4084,9 @@ class MarkdownEditorApp(App):
 
     def _create_daily_note(self) -> None:
         """Создать ежедневную заметку с предзаполненным frontmatter."""
-        from datetime import date
+        from datetime import datetime, timezone
 
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         filename = today.strftime("%d.%m.%Y") + ".md"
 
         # Каталог для ежедневных заметок — внутри корня заметок
@@ -4125,7 +4121,7 @@ class MarkdownEditorApp(App):
 
         self.push_screen(TemplateSelectModal(templates_dir), self._on_template_selected)
 
-    def _on_template_selected(self, template_name: Optional[str]) -> None:
+    def _on_template_selected(self, template_name: str | None) -> None:
         """Обработчик выбора шаблона — запрашивает имя файла и создаёт заметку."""
         if not template_name:
             return
@@ -4139,7 +4135,7 @@ class MarkdownEditorApp(App):
 
         catalog = self._current_catalog()
 
-        def done(name: Optional[str]) -> None:
+        def done(name: str | None) -> None:
             if not name:
                 return
             if not name.endswith(".md"):
@@ -4186,13 +4182,13 @@ class MarkdownEditorApp(App):
 
     def action_refresh(self):
         """Обновить список файлов."""
-        file_tree = self.query_one("#file-tree", FileTree)
+        self.query_one("#file-tree", FileTree)
         self._refresh_file_tree()
         self._rebuild_tag_cache()
         self._update_tag_cloud()
         self.notify(_("File list refreshed"), severity="information")
 
-    def _selected_path(self) -> Optional[Path]:
+    def _selected_path(self) -> Path | None:
         """Вернуть путь выбранного узла в дереве файлов (файл или каталог)."""
         tree = self.query_one("#file-tree", FileTree)
         node = tree.cursor_node
@@ -4214,7 +4210,7 @@ class MarkdownEditorApp(App):
             self.notify(_("Cannot delete root directory"), severity="warning")
             return
 
-        def confirm(confirmed: Optional[bool]) -> None:
+        def confirm(confirmed: bool | None) -> None:
             if not confirmed:
                 return
             try:
@@ -4254,7 +4250,7 @@ class MarkdownEditorApp(App):
             self.notify(_("Cannot rename root directory"), severity="warning")
             return
 
-        def done(name: Optional[str]) -> None:
+        def done(name: str | None) -> None:
             if not name:
                 return
             new_path = path.parent / name
@@ -4322,7 +4318,8 @@ class MarkdownEditorApp(App):
 
     def _save_form_to_note(self, event: FormView.Saved) -> None:
         """Сохранить данные формы как md-заметку с frontmatter."""
-        from datetime import datetime
+        from datetime import datetime, timezone
+
         import yaml as _yaml
 
         root = self.file_system.root_path
@@ -4340,7 +4337,7 @@ class MarkdownEditorApp(App):
                     filename = clean + ".md"
                     break
         if not filename:
-            filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".md"
+            filename = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + ".md"
 
         filepath = catalog_path / filename
         fm_str = _yaml.dump(

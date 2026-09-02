@@ -34,7 +34,6 @@
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Union
 
 
 @dataclass
@@ -45,9 +44,9 @@ class Cell:
 
 @dataclass
 class MarkdownTable:
-    rows: List[List[Cell]]
+    rows: list[list[Cell]]
     has_header: bool = True
-    alignments: List[str] = field(default_factory=list)
+    alignments: list[str] = field(default_factory=list)
 
     @property
     def num_rows(self) -> int:
@@ -58,7 +57,7 @@ class MarkdownTable:
         return max((len(r) for r in self.rows), default=0)
 
 
-def parse_table_block(lines: List[str], start_idx: int) -> Tuple[Optional[MarkdownTable], int]:
+def parse_table_block(lines: list[str], start_idx: int) -> tuple[MarkdownTable | None, int]:
     """Парсит блок таблицы, начинающийся со start_idx.
 
     Возвращает (MarkdownTable или None, индекс строки ПОСЛЕ таблицы).
@@ -66,14 +65,14 @@ def parse_table_block(lines: List[str], start_idx: int) -> Tuple[Optional[Markdo
     if start_idx >= len(lines) or not lines[start_idx].strip().startswith("|"):
         return None, start_idx
 
-    table_lines: List[str] = []
+    table_lines: list[str] = []
     i = start_idx
     while i < len(lines) and lines[i].strip().startswith("|"):
         table_lines.append(lines[i])
         i += 1
 
-    rows: List[List[Cell]] = []
-    alignments: List[str] = []
+    rows: list[list[Cell]] = []
+    alignments: list[str] = []
     has_header = False
 
     for line in table_lines:
@@ -121,7 +120,7 @@ def parse_table_block(lines: List[str], start_idx: int) -> Tuple[Optional[Markdo
     return MarkdownTable(rows=rows, has_header=has_header, alignments=alignments[:num_cols]), i
 
 
-def parse_formula_comment(line: str) -> List[str]:
+def parse_formula_comment(line: str) -> list[str]:
     """Извлечь список формул из строки комментария.
 
     Поддерживает:
@@ -159,11 +158,11 @@ def _safe_eval(expr: str) -> float:
     )
     for node in ast.walk(tree):
         if not isinstance(node, allowed):
-            raise ValueError(f"Disallowed node in expression: {type(node).__name__}")
-    return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, {})
+            raise TypeError(f"Disallowed node in expression: {type(node).__name__}")
+    return eval(compile(tree, "<string>", "eval"), {"__builtins__": {}}, {})  # nosec B307
 
 
-def _to_number(value: str) -> Optional[float]:
+def _to_number(value: str) -> float | None:
     """Преобразовать строку в число или None."""
     s = value.strip()
     if not s:
@@ -197,7 +196,7 @@ class FormulaEvaluator:
     # ------------------------------------------------------------------
     # Разбор ссылок
     # ------------------------------------------------------------------
-    def _parse_cell_ref(self, ref: str, current_row: int, current_col: int) -> Tuple[int, int]:
+    def _parse_cell_ref(self, ref: str, current_row: int, current_col: int) -> tuple[int, int]:
         """Преобразовать текстовую ссылку в (row, col) 0-based."""
         ref = ref.strip()
 
@@ -220,7 +219,7 @@ class FormulaEvaluator:
 
         raise ValueError(f"Invalid cell reference: {ref}")
 
-    def _parse_range(self, ref: str, current_row: int, current_col: int) -> List[Tuple[int, int]]:
+    def _parse_range(self, ref: str, current_row: int, current_col: int) -> list[tuple[int, int]]:
         """Разобрать список ячеек (через запятую) или диапазон (через ..)."""
         parts = [p.strip() for p in ref.split(",")]
         result = []
@@ -239,14 +238,14 @@ class FormulaEvaluator:
     # ------------------------------------------------------------------
     # Чтение/запись ячеек
     # ------------------------------------------------------------------
-    def _get(self, row: int, col: int) -> Optional[float]:
+    def _get(self, row: int, col: int) -> float | None:
         if row < 0 or row >= self.table.num_rows:
             return None
         if col < 0 or col >= len(self.table.rows[row]):
             return None
         return _to_number(self.table.rows[row][col].value)
 
-    def _set(self, row: int, col: int, value: Union[float, str]) -> None:
+    def _set(self, row: int, col: int, value: float | str) -> None:
         if row < 0 or row >= self.table.num_rows:
             return
         # Дополняем строку при необходимости
@@ -258,7 +257,7 @@ class FormulaEvaluator:
     # ------------------------------------------------------------------
     # Вычисление выражений
     # ------------------------------------------------------------------
-    def _eval_expr(self, expr: str, current_row: int, current_col: int) -> Optional[float]:
+    def _eval_expr(self, expr: str, current_row: int, current_col: int) -> float | None:
         expr = expr.strip()
 
         # 1. Числовой литерал (включая проценты вида 50%)
@@ -388,14 +387,14 @@ class FormulaEvaluator:
             self._set(r, c, val)
 
 
-def apply_formulas(table: MarkdownTable, formulas: List[str]) -> None:
+def apply_formulas(table: MarkdownTable, formulas: list[str]) -> None:
     """Применить список формул к таблице."""
     evaluator = FormulaEvaluator(table)
     for formula in formulas:
         evaluator.apply_formula(formula)
 
 
-def process_table_with_formulas(lines: List[str], start_idx: int) -> Tuple[Optional[MarkdownTable], int]:
+def process_table_with_formulas(lines: list[str], start_idx: int) -> tuple[MarkdownTable | None, int]:
     """Парсит таблицу + формулы, применяет вычисления.
 
     Возвращает (MarkdownTable с computed ячейками, индекс строки ПОСЛЕ блока).

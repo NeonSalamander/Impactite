@@ -3,20 +3,21 @@
 """
 import colorsys
 import json
+import logging
 import os
 import re
 import sqlite3
 import webbrowser
-from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple, Union, Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, ClassVar
 
 import yaml
 from markdown import Markdown
 from pygments import highlight
-from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters import TerminalFormatter
+from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.styles import get_all_styles
 from rich.color import Color
 
@@ -28,6 +29,9 @@ except ImportError:
     # Fallback for development - in production, ladybug should be installed
     ladybug = None
     Connection = None
+
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,13 +46,13 @@ class Config:
     """Конфигурация приложения."""
     notes_path: str = "./notes"
     language: str = "en"
-    hotkeys: Dict[str, str] = field(default_factory=dict)
-    display: Dict[str, any] = field(default_factory=dict)
-    tags: Dict[str, any] = field(default_factory=dict)
+    hotkeys: dict[str, str] = field(default_factory=dict)
+    display: dict[str, Any] = field(default_factory=dict)
+    tags: dict[str, Any] = field(default_factory=dict)
     daily_notes_folder: str = "Daily notes"
     templates_path: str = "./templates"
     author: str = ""
-    directory_colors: Dict[str, DirectoryStyle] = field(default_factory=dict)
+    directory_colors: dict[str, DirectoryStyle] = field(default_factory=dict)
     config_path: str = field(default="config.yaml", repr=False)
 
     def resolve_notes_path(self) -> Path:
@@ -152,7 +156,7 @@ class Config:
             f.writelines(lines)
 
     @classmethod
-    def load(cls, config_path: str = "config.yaml") -> "Config":
+    def load(cls, config_path: str = "config.yaml") -> Config:
         """Загрузка конфигурации из YAML файла."""
         default_config = {
             "notes_path": "./notes",
@@ -192,13 +196,13 @@ class Config:
             with open(config_path, "r", encoding="utf-8") as f:
                 loaded = yaml.safe_load(f) or {}
                 # Объединяем с дефолтными значениями
-                for key in default_config:
+                for key, value in default_config.items():
                     if key not in loaded:
-                        loaded[key] = default_config[key]
-                    elif isinstance(default_config[key], dict):
-                        for subkey in default_config[key]:
+                        loaded[key] = value
+                    elif isinstance(value, dict):
+                        for subkey, subvalue in value.items():
                             if subkey not in loaded[key]:
-                                loaded[key][subkey] = default_config[key][subkey]
+                                loaded[key][subkey] = subvalue
                 return cls(
                     notes_path=loaded.get("notes_path", default_config["notes_path"]),
                     language=loaded.get("language", default_config["language"]),
@@ -232,7 +236,7 @@ class Config:
             raise ValueError(f"invalid color: {value}") from exc
         return normalized
 
-    def get_directory_style(self, rel_path: str) -> Optional[DirectoryStyle]:
+    def get_directory_style(self, rel_path: str) -> DirectoryStyle | None:
         """Получить сохранённый стиль для каталога по относительному пути."""
         return self.directory_colors.get(rel_path)
 
@@ -251,7 +255,7 @@ class Config:
 
     def save_directory_colors(self) -> None:
         """Записать раздел directory_colors в config.yaml."""
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
         config_file = Path(self.config_path).expanduser()
         if config_file.exists():
             with open(config_file, "r", encoding="utf-8") as f:
@@ -266,15 +270,15 @@ class Config:
 
 
 # Known light/dark theme pairs used by the Ctrl+L toggle.
-_THEME_PAIRS: Tuple[Tuple[str, str], ...] = (
+_THEME_PAIRS: tuple[tuple[str, str], ...] = (
     ("textual-dark", "textual-light"),
     ("catppuccin-mocha", "catppuccin-latte"),
     ("rose-pine-moon", "rose-pine-dawn"),
     ("atom-one-dark", "atom-one-light"),
 )
 
-_LIGHT_THEME_BY_DARK: Dict[str, str] = {pair[0]: pair[1] for pair in _THEME_PAIRS}
-_DARK_THEME_BY_LIGHT: Dict[str, str] = {pair[1]: pair[0] for pair in _THEME_PAIRS}
+_LIGHT_THEME_BY_DARK: dict[str, str] = {pair[0]: pair[1] for pair in _THEME_PAIRS}
+_DARK_THEME_BY_LIGHT: dict[str, str] = {pair[1]: pair[0] for pair in _THEME_PAIRS}
 
 
 def resolve_theme_variant(user_theme: str, target_light: bool, light_themes: frozenset[str]) -> str:
@@ -327,7 +331,7 @@ def validate_theme(theme: str, fallback: str = "textual-dark") -> str:
     return fallback
 
 
-def location_after_frontmatter(text: str, location: Tuple[int, int]) -> Tuple[int, int]:
+def location_after_frontmatter(text: str, location: tuple[int, int]) -> tuple[int, int]:
     """Return a safe insertion location that is not inside YAML frontmatter.
 
     A YAML frontmatter block is recognised when the first line equals ``---``
@@ -376,7 +380,7 @@ class FileNode:
     name: str
     path: Path
     is_dir: bool
-    children: List["FileNode"] = field(default_factory=list)
+    children: list[FileNode] = field(default_factory=list)
     level: int = 0
 
     def __lt__(self, other):
@@ -399,7 +403,7 @@ class Match:
 class SearchState:
     """Состояние поиска по текущей открытой заметке."""
     query: str = ""
-    matches: List["Match"] = field(default_factory=list)
+    matches: list[Match] = field(default_factory=list)
     current_index: int = -1
     is_active: bool = False
 
@@ -420,7 +424,7 @@ class SearchState:
         self.current_index = (self.current_index - 1) % len(self.matches)
 
 
-def find_matches(text: str, query: str) -> List[Match]:
+def find_matches(text: str, query: str) -> list[Match]:
     """Найти все вхождения query в text (без учёта регистра, литеральная подстрока).
 
     Возвращает список непересекающихся совпадений с позициями в строках и столбцах.
@@ -429,7 +433,7 @@ def find_matches(text: str, query: str) -> List[Match]:
         return []
     query_lower = query.lower()
     q_len = len(query)
-    matches: List[Match] = []
+    matches: list[Match] = []
     offset = 0
     for lnum, line in enumerate(text.split("\n")):
         start = 0
@@ -497,7 +501,7 @@ class FileSystem:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     def create_directory(self, path: Path) -> bool:
@@ -508,7 +512,7 @@ class FileSystem:
         except Exception:
             return False
 
-    def get_md_files(self) -> List[Path]:
+    def get_md_files(self) -> list[Path]:
         """Получить все .md файлы."""
         return list(self.root_path.rglob("*.md"))
 
@@ -525,11 +529,11 @@ class MarkdownParser:
         """Преобразовать Markdown в HTML."""
         return self.md.convert(content)
 
-    def extract_tags(self, content: str) -> Set[str]:
+    def extract_tags(self, content: str) -> set[str]:
         """Извлечь все теги из содержимого."""
         return set(self._tag_pattern.findall(content))
 
-    def _parse_frontmatter(self, content: str) -> Tuple[Dict, str]:
+    def _parse_frontmatter(self, content: str) -> tuple[dict, str]:
         """Вернуть (словарь frontmatter, тело документа без frontmatter)."""
         if not content.startswith("---"):
             return {}, content
@@ -544,7 +548,7 @@ class MarkdownParser:
             fm = {}
         return fm, content[end + 4:]
 
-    def extract_tags_with_source(self, path: Path) -> Tuple[Set[str], Set[str]]:
+    def extract_tags_with_source(self, path: Path) -> tuple[set[str], set[str]]:
         """Вернуть (теги из frontmatter, теги из тела файла).
 
         Теги из frontmatter не включаются в body-набор.
@@ -556,7 +560,7 @@ class MarkdownParser:
 
         fm, body = self._parse_frontmatter(content)
 
-        fm_tags: Set[str] = set()
+        fm_tags: set[str] = set()
         raw = fm.get("tags", [])
         if isinstance(raw, str):
             raw = [t.strip() for t in raw.split(",")]
@@ -570,7 +574,7 @@ class MarkdownParser:
         body_tags = self.extract_tags(body) - fm_tags
         return fm_tags, body_tags
 
-    def extract_tags_from_file(self, path: Path) -> Set[str]:
+    def extract_tags_from_file(self, path: Path) -> set[str]:
         """Извлечь теги из файла."""
         try:
             content = path.read_text(encoding="utf-8")
@@ -578,16 +582,16 @@ class MarkdownParser:
         except Exception:
             return set()
 
-    def extract_internal_links(self, content: str) -> Set[str]:
+    def extract_internal_links(self, content: str) -> set[str]:
         """Извлечь внутренние ссылки на другие заметки (не URL/почта)."""
-        links: Set[str] = set()
+        links: set[str] = set()
         for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', content):
             url = match.group(2)
             if not re.match(r'^(https?://|mailto:)', url):
                 links.add(url)
         return links
 
-    def extract_internal_links_from_file(self, path: Path) -> Set[str]:
+    def extract_internal_links_from_file(self, path: Path) -> set[str]:
         """Извлечь внутренние ссылки из файла."""
         try:
             content = path.read_text(encoding="utf-8")
@@ -595,7 +599,7 @@ class MarkdownParser:
         except Exception:
             return set()
 
-    def find_files_by_tag(self, files: List[Path], tag: str) -> List[Tuple[Path, str]]:
+    def find_files_by_tag(self, files: list[Path], tag: str) -> list[tuple[Path, str]]:
         """Найти файлы, содержащие указанный тег."""
         results = []
         for file_path in files:
@@ -609,11 +613,12 @@ class MarkdownParser:
                         end = min(len(content), match.end() + 50)
                         context = content[start:end].strip()
                         results.append((file_path, context))
-            except Exception:
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
                 continue
         return results
 
-    def highlight_code_block(self, code: str, language: str = None) -> str:
+    def highlight_code_block(self, code: str, language: str | None = None) -> str:
         """Подсветить блок кода."""
         try:
             if language:
@@ -723,13 +728,13 @@ class TagIndex:
         r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
-    def rebuild(self, files: List[Path], parser: MarkdownParser) -> None:
+    def rebuild(self, files: list[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить индекс.
 
         Пропускает неизменённые файлы, удаляет записи для удалённые.
         """
         # Convert files to set of strings for easier comparison
-        markdown_files = set(str(f) for f in files)
+        markdown_files = {str(f) for f in files}
         
         # Get currently indexed files from LadybugDB
         indexed_files = {}
@@ -855,7 +860,7 @@ class TagIndex:
             DETACH DELETE t
         """)
     
-    def _parse_file_for_indexing(self, file_path: str, parser: MarkdownParser) -> Tuple[Set[str], Set[str], Optional[Dict]]:
+    def _parse_file_for_indexing(self, file_path: str, parser: MarkdownParser) -> tuple[set[str], set[str], dict | None]:
         """Parse a markdown file to extract frontmatter tags, body tags, and form data"""
         path_obj = Path(file_path)
         
@@ -887,7 +892,7 @@ class TagIndex:
         r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
         return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
     
-    def _upsert_form_record(self, file_path: str, form_data: Dict) -> None:
+    def _upsert_form_record(self, file_path: str, form_data: dict) -> None:
         """Insert or update a form record in the database"""
         # Generate deterministic ID based on file path and form data
         form_id = hash((file_path, json.dumps(form_data, sort_keys=True))) & ((1 << 63) - 1)
@@ -922,7 +927,7 @@ class TagIndex:
             "file_path": file_path
         })
 
-    def rebuild_note_links(self, files: List[Path], parser: MarkdownParser) -> None:
+    def rebuild_note_links(self, files: list[Path], parser: MarkdownParser) -> None:
         """Инкрементально обновить связи между заметками.
 
         Использует те же file_mtimes для определения изменённых файлов.
@@ -990,9 +995,9 @@ class TagIndex:
                         MERGE (f)-[r:LINKS_TO]->(t)
                     """, {"src": path_str, "tgt": str(target)})
 
-    def get_note_links(self) -> Dict[Path, Set[Path]]:
+    def get_note_links(self) -> dict[Path, set[Path]]:
         """Вернуть {source: {target, ...}} по всем связям."""
-        result: Dict[Path, Set[Path]] = {}
+        result: dict[Path, set[Path]] = {}
         try:
             query_result = self.connection.execute("""
                 MATCH (f:File)-[:LINKS_TO]->(t:File)
@@ -1001,11 +1006,11 @@ class TagIndex:
             while query_result.has_next():
                 row = query_result.get_next()
                 result.setdefault(Path(row[0]), set()).add(Path(row[1]))
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
         return result
 
-    def get_backlinks(self, path: Path) -> List[Path]:
+    def get_backlinks(self, path: Path) -> list[Path]:
         """Вернуть отсортированный список файлов, ссылающихся на указанный.
 
         Обратные ссылки вычисляются по индексу LINKS_TO; самоссылки исключаются.
@@ -1026,7 +1031,7 @@ class TagIndex:
         except Exception:
             return []
 
-    def get_tag_files(self) -> Dict[str, List[Path]]:
+    def get_tag_files(self) -> dict[str, list[Path]]:
         """Вернуть {тег: [Path, ...]} по всем проиндексированным файлам."""
         try:
             # Query for all tag-file relationships
@@ -1036,7 +1041,7 @@ class TagIndex:
             """)
             
             # Group by tag
-            tag_files: Dict[str, List[Path]] = {}
+            tag_files: dict[str, list[Path]] = {}
             while result.has_next():
                 row = result.get_next()
                 tag = row[0]
@@ -1049,7 +1054,7 @@ class TagIndex:
         except Exception:
             return {}
     
-    def get_tag_counts(self) -> Dict[str, int]:
+    def get_tag_counts(self) -> dict[str, int]:
         """Вернуть {тег: количество файлов}."""
         try:
             result = self.connection.execute("""
@@ -1066,7 +1071,7 @@ class TagIndex:
         except Exception:
             return {}
     
-    def get_tag_colors(self) -> Dict[str, str]:
+    def get_tag_colors(self) -> dict[str, str]:
         """Вернуть {тег: цвет hex} для всех тегов."""
         try:
             result = self.connection.execute("""
@@ -1083,7 +1088,7 @@ class TagIndex:
         except Exception:
             return {}
     
-    def save_form_record(self, form_source: str, catalog: str, values: Dict) -> int:
+    def save_form_record(self, form_source: str, catalog: str, values: dict) -> int:
         """Сохранить запись формы в БД. Значения сериализуются в JSON.
 
         Возвращает id вставленной записи.
@@ -1107,15 +1112,15 @@ class TagIndex:
             "form_id": form_id,
             "source": form_source,
             "catalog": catalog,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "data": json.dumps(values, ensure_ascii=False)
         })
         
         return form_id
 
     def get_form_records(
-        self, form_source: Optional[str] = None, catalog: Optional[str] = None
-    ) -> List[Dict]:
+        self, form_source: str | None = None, catalog: str | None = None
+    ) -> list[dict]:
         """Вернуть записи форм (опционально фильтруя по источнику/каталогу).
 
         Каждая запись — dict {id, form_source, catalog, data, created_at},
@@ -1158,26 +1163,28 @@ class TagIndex:
 
     # ---- избранное -----------------------------------------------------------
 
-    def add_favorite(self, file_path: Union[str, Path]) -> None:
+    def add_favorite(self, file_path: str | Path) -> None:
         """Добавить файл в избранное"""
         try:
             self.connection.execute("""
                 MERGE (fav:Favorite {file_path: $file_path})
             """, {"file_path": str(file_path)})
-        except Exception:
-            pass  # Fail silently to match existing behavior
+        except Exception as _exc:
+            _log.debug("Ladybug favorite operation failed", exc_info=_exc)
+            # Fail silently to match existing behavior
 
-    def remove_favorite(self, file_path: Union[str, Path]) -> None:
+    def remove_favorite(self, file_path: str | Path) -> None:
         """Удалить файл из избранного"""
         try:
             self.connection.execute("""
                 MATCH (fav:Favorite {file_path: $file_path})
                 DELETE fav
             """, {"file_path": str(file_path)})
-        except Exception:
-            pass  # Fail silently to match existing behavior
+        except Exception as _exc:
+            _log.debug("Ladybug favorite operation failed", exc_info=_exc)
+            # Fail silently to match existing behavior
 
-    def toggle_favorite(self, file_path: Union[str, Path]) -> bool:
+    def toggle_favorite(self, file_path: str | Path) -> bool:
         """Переключить статус избранного для файла"""
         if self.is_favorite(file_path):
             self.remove_favorite(file_path)
@@ -1185,7 +1192,7 @@ class TagIndex:
         self.add_favorite(file_path)
         return True
 
-    def is_favorite(self, file_path: Union[str, Path]) -> bool:
+    def is_favorite(self, file_path: str | Path) -> bool:
         """Проверить, отмечен ли файл как избранный"""
         try:
             result = self.connection.execute("""
@@ -1201,7 +1208,7 @@ class TagIndex:
         except Exception:
             return False
 
-    def get_favorites(self) -> List[str]:
+    def get_favorites(self) -> list[str]:
         """Получить все избранные файлы"""
         try:
             result = self.connection.execute("""
@@ -1218,7 +1225,7 @@ class TagIndex:
         except Exception:
             return []
 
-    def run_read_cypher(self, query: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def run_read_cypher(self, query: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """
         Execute a read-only Cypher query and return the results as a list of dictionaries.
         Each dictionary represents a row, with keys being the column names (or variable names in the RETURN clause).
@@ -1245,7 +1252,7 @@ class TagIndex:
         return rows
 
 
-def parse_form_definition(content: str) -> Optional[Dict]:
+def parse_form_definition(content: str) -> dict | None:
     """Проверить является ли заметка формой ввода.
 
     Возвращает dict {catalog, destination, fields} если первый ключ frontmatter —
@@ -1276,7 +1283,7 @@ def parse_form_definition(content: str) -> Optional[Dict]:
         return None
 
 
-def parse_base_definition(content: str) -> Optional[Dict]:
+def parse_base_definition(content: str) -> dict | None:
     """Проверить является ли заметка базовой выборкой.
 
     Возвращает dict {query, filters} если type == base, иначе None.
@@ -1332,22 +1339,22 @@ class QueryEngine:
     Для database неявные поля: id, catalog, source, created_at.
     """
 
-    _KEYWORDS = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING",
+    _KEYWORDS: ClassVar[list[str]] = ["SELECT", "FROM", "WHERE", "GROUP BY", "HAVING",
                  "ORDER BY", "LIMIT"]
     _COND_RE = re.compile(
         r"^(.+?)\s*(>=|<=|!=|=|>|<|\bCONTAINS\b|\bLIKE\b)\s*(.+)$", re.IGNORECASE
     )
     _AGG_RE = re.compile(r"^(SUM|MIN|MAX|AVG|COUNT)\s*\(\s*(.+?)\s*\)$", re.IGNORECASE)
 
-    def __init__(self, file_system: "FileSystem", parser: "MarkdownParser",
-                 tag_index: "TagIndex") -> None:
+    def __init__(self, file_system: FileSystem, parser: MarkdownParser,
+                 tag_index: TagIndex) -> None:
         self.fs = file_system
         self.parser = parser
         self.tag_index = tag_index
 
     # ---- публичный API -----------------------------------------------------
 
-    def execute(self, query_text: str) -> Tuple[List[str], List[Dict]]:
+    def execute(self, query_text: str) -> tuple[list[str], list[dict]]:
         """Выполнить запрос. Вернуть (колонки, строки)."""
         q = self._parse_query(query_text)
         if q["source"] == "database":
@@ -1385,10 +1392,10 @@ class QueryEngine:
 
     # ---- группировка и агрегаты -------------------------------------------
 
-    def _aggregate(self, rows: List[Dict], select: Optional[List[str]],
-                   group_by: Optional[List[str]],
-                   having: Optional[List[Tuple]] = None
-                   ) -> Tuple[List[str], List[Dict]]:
+    def _aggregate(self, rows: list[dict], select: list[str] | None,
+                   group_by: list[str] | None,
+                   having: list[tuple] | None = None
+                   ) -> tuple[list[str], list[dict]]:
         """Сгруппировать строки и вычислить агрегаты. Вернуть (колонки, строки).
 
         Агрегаты, упомянутые только в HAVING, тоже вычисляются (как скрытые
@@ -1400,7 +1407,7 @@ class QueryEngine:
             select = list(keys) + ["COUNT(*)"]
 
         # Разобрать SELECT в спецификации колонок
-        specs: List[Tuple] = []  # (label, kind, func, arg)
+        specs: list[tuple] = []  # (label, kind, func, arg)
         for item in select:
             m = self._AGG_RE.match(item)
             if m:
@@ -1410,15 +1417,15 @@ class QueryEngine:
 
         # Дополнительные агрегаты, нужные только для HAVING
         spec_labels = {s[0] for s in specs}
-        extra: List[Tuple] = []
-        for field, _op, _val in (having or []):
-            m = self._AGG_RE.match(field)
-            if m and field not in spec_labels and field not in {e[0] for e in extra}:
+        extra: list[tuple] = []
+        for fld, _op, _val in (having or []):
+            m = self._AGG_RE.match(fld)
+            if m and fld not in spec_labels and fld not in {e[0] for e in extra}:
                 extra.append((field, "agg", m.group(1).upper(), m.group(2).strip()))
 
         # Сгруппировать строки, сохраняя порядок появления групп
-        groups: Dict[Tuple, List[Dict]] = {}
-        order_of_keys: List[Tuple] = []
+        groups: dict[tuple, list[dict]] = {}
+        order_of_keys: list[tuple] = []
         for r in rows:
             key = tuple(self._hashable(r.get(f)) for f in keys)
             if key not in groups:
@@ -1430,10 +1437,10 @@ class QueryEngine:
             order_of_keys = [()]
             groups = {(): rows}
 
-        result: List[Dict] = []
+        result: list[dict] = []
         for key in order_of_keys:
             grp = groups[key]
-            out: Dict = {}
+            out: dict = {}
             # Группирующие поля доступны для HAVING по их именам
             for f in keys:
                 out[f] = grp[0].get(f) if grp else None
@@ -1445,7 +1452,7 @@ class QueryEngine:
             result.append(out)
         return [s[0] for s in specs], result
 
-    def _compute_agg(self, func: str, arg: str, group: List[Dict]):
+    def _compute_agg(self, func: str, arg: str, group: list[dict]):
         if func == "COUNT":
             if arg == "*":
                 return len(group)
@@ -1467,8 +1474,8 @@ class QueryEngine:
         return chooser(non_null, key=self._sort_key)
 
     @staticmethod
-    def _numeric(values) -> List[float]:
-        nums: List[float] = []
+    def _numeric(values) -> list[float]:
+        nums: list[float] = []
         for v in values:
             if isinstance(v, bool) or v is None:
                 continue
@@ -1491,7 +1498,7 @@ class QueryEngine:
 
     # ---- парсинг запроса ---------------------------------------------------
 
-    def _parse_query(self, text: str) -> Dict:
+    def _parse_query(self, text: str) -> dict:
         clauses = self._split_clauses(text)
         # FROM
         source, filt = "notes", None
@@ -1538,9 +1545,9 @@ class QueryEngine:
                 "where": where, "group_by": group_by, "having": having,
                 "order": order, "limit": limit}
 
-    def _parse_conditions(self, text: Optional[str]) -> List[Tuple]:
+    def _parse_conditions(self, text: str | None) -> list[tuple]:
         """Разобрать условия WHERE/HAVING в список (field, op, value)."""
-        conds: List[Tuple] = []
+        conds: list[tuple] = []
         if not text:
             return conds
         for part in re.split(r"\s+AND\s+", text, flags=re.IGNORECASE):
@@ -1551,14 +1558,14 @@ class QueryEngine:
                               self._coerce(m.group(3).strip())))
         return conds
 
-    def _split_clauses(self, text: str) -> Dict[str, str]:
+    def _split_clauses(self, text: str) -> dict[str, str]:
         """Разбить текст запроса на части по ключевым словам."""
         positions = []
         for kw in self._KEYWORDS:
             for m in re.finditer(rf"\b{kw}\b", text, re.IGNORECASE):
                 positions.append((m.start(), m.end(), kw))
         positions.sort()
-        clauses: Dict[str, str] = {}
+        clauses: dict[str, str] = {}
         for i, (start, end, kw) in enumerate(positions):
             nxt = positions[i + 1][0] if i + 1 < len(positions) else len(text)
             clauses[kw] = text[end:nxt].strip()
@@ -1566,8 +1573,8 @@ class QueryEngine:
 
     # ---- источники данных --------------------------------------------------
 
-    def _rows_from_notes(self, subfolder: Optional[str]) -> List[Dict]:
-        rows: List[Dict] = []
+    def _rows_from_notes(self, subfolder: str | None) -> list[dict]:
+        rows: list[dict] = []
         root = self.fs.root_path
         base = (root / subfolder) if subfolder else root
         for path in self.fs.get_md_files():
@@ -1575,7 +1582,8 @@ class QueryEngine:
                 continue
             try:
                 content = path.read_text(encoding="utf-8")
-            except Exception:
+            except Exception as _exc:
+                _log.debug("Suppressed exception", exc_info=_exc)
                 continue
             fm, _ = self.parser._parse_frontmatter(content)
             if not isinstance(fm, dict):
@@ -1586,8 +1594,8 @@ class QueryEngine:
             rows.append(row)
         return rows
 
-    def _rows_from_db(self, catalog: Optional[str]) -> List[Dict]:
-        rows: List[Dict] = []
+    def _rows_from_db(self, catalog: str | None) -> list[dict]:
+        rows: list[dict] = []
         for rec in self.tag_index.get_form_records(catalog=catalog or None):
             row = dict(rec["data"]) if isinstance(rec["data"], dict) else {}
             row["id"] = rec["id"]
@@ -1602,9 +1610,9 @@ class QueryEngine:
 
     # ---- фильтрация и сортировка -------------------------------------------
 
-    def _match(self, row: Dict, conditions: List[Tuple]) -> bool:
-        for field, op, expected in conditions:
-            actual = row.get(field)
+    def _match(self, row: dict, conditions: list[tuple]) -> bool:
+        for fld, op, expected in conditions:
+            actual = row.get(fld)
             if not self._compare(actual, op, expected):
                 return False
         return True
@@ -1665,8 +1673,8 @@ class QueryEngine:
         return t
 
     @staticmethod
-    def _infer_columns(rows: List[Dict]) -> List[str]:
-        cols: List[str] = []
+    def _infer_columns(rows: list[dict]) -> list[str]:
+        cols: list[str] = []
         for r in rows:
             for k in r:
                 if k not in cols:
@@ -1684,7 +1692,7 @@ class QueryEngine:
         return str(value)
 
 
-def get_available_syntax_themes() -> List[str]:
+def get_available_syntax_themes() -> list[str]:
     """Получить список доступных тем подсветки."""
     return list(get_all_styles())
 
@@ -1711,8 +1719,8 @@ class FullTextIndex:
         """Закрыть соединение с индексом."""
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
 
     def _detect_fts5(self) -> bool:
         """Проверить, что SQLite поддерживает FTS5."""
@@ -1760,13 +1768,13 @@ class FullTextIndex:
                     pass
             self._ensure_schema()
 
-    def rebuild(self, files: List[Path]) -> None:
+    def rebuild(self, files: list[Path]) -> None:
         """Инкрементально обновить индекс."""
         current = {row["path"]: row["mtime"] for row in self._conn.execute("SELECT path, mtime FROM files")}
         file_set = {str(f): f for f in files}
 
         to_delete = set(current.keys()) - set(file_set.keys())
-        to_update: List[Path] = []
+        to_update: list[Path] = []
         for path_str, path in file_set.items():
             try:
                 mtime = path.stat().st_mtime
@@ -1792,7 +1800,7 @@ class FullTextIndex:
         """Добавить или обновить один файл в индексе."""
         self._upsert_file(path)
 
-    def index_files(self, files: List[Path]) -> None:
+    def index_files(self, files: list[Path]) -> None:
         """Добавить или обновить несколько файлов."""
         for path in files:
             self._upsert_file(path)
@@ -1831,8 +1839,8 @@ class FullTextIndex:
     def search(
         self,
         query: str,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Выполнить поиск и вернуть список результатов.
 
         Каждый результат — dict с ключами ``path`` (Path) и ``snippet`` (str).
@@ -1849,7 +1857,7 @@ class FullTextIndex:
             return self._search_fts(query, limit)
         return self._search_like(terms, limit)
 
-    def _search_fts(self, query: str, limit: Optional[int]) -> List[Dict[str, Any]]:
+    def _search_fts(self, query: str, limit: int | None) -> list[dict[str, Any]]:
         match_expr = self._build_match_expr(query)
         sql = """
             SELECT path, snippet(files_fts, 2, '<', '>', '...', 40) AS snippet
@@ -1857,14 +1865,14 @@ class FullTextIndex:
             WHERE files_fts MATCH ?
             ORDER BY bm25(files_fts)
         """
-        params: List[Any] = [match_expr]
+        params: list[Any] = [match_expr]
         if limit:
             sql += " LIMIT ?"
             params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [{"path": Path(row["path"]), "snippet": row["snippet"] or ""} for row in rows]
 
-    def _search_like(self, terms: List[str], limit: Optional[int]) -> List[Dict[str, Any]]:
+    def _search_like(self, terms: list[str], limit: int | None) -> list[dict[str, Any]]:
         # Fallback: LIKE по каждому термину; регистронезависимо
         like_pattern = f"%{terms[0].lower()}%"
         sql = "SELECT path, filename FROM files WHERE lower(content) LIKE ?"
@@ -1882,7 +1890,7 @@ class FullTextIndex:
             result.append({"path": Path(row["path"]), "snippet": snippet})
         return result
 
-    def _make_snippet(self, path: Path, terms: List[str]) -> str:
+    def _make_snippet(self, path: Path, terms: list[str]) -> str:
         try:
             content = path.read_text(encoding="utf-8")
         except Exception:
@@ -1910,12 +1918,12 @@ class FullTextIndex:
             return query
         return " AND ".join(tokens)
 
-    def _tokenize_query(self, query: str) -> List[str]:
+    def _tokenize_query(self, query: str) -> list[str]:
         """Разбить запрос на токены для MATCH/LIKE.
 
         Поддерживает фразы в кавычках. Возвращает токены без изменения регистра.
         """
-        tokens: List[str] = []
+        tokens: list[str] = []
         for match in re.finditer(r'"([^"]+)"|\S+', query):
             token = match.group(1) if match.group(1) is not None else match.group(0)
             token = token.strip()
@@ -1923,7 +1931,7 @@ class FullTextIndex:
                 tokens.append(token)
         return tokens
 
-    def extract_terms(self, query: str) -> List[str]:
+    def extract_terms(self, query: str) -> list[str]:
         """Вернуть список нормализованных терминов для подсветки совпадений."""
         return [t.lower() for t in re.findall(r"\w+", query) if t.strip()]
 
@@ -1968,10 +1976,10 @@ def _strip_trailing_punctuation(url: str) -> str:
 
 def is_external_url(target: str) -> bool:
     """Вернуть True, если цель ссылки — внешний http/https URL."""
-    return target.startswith("http://") or target.startswith("https://")
+    return target.startswith(("http://", "https://"))
 
 
-def find_external_links(line: str) -> List[ExternalLink]:
+def find_external_links(line: str) -> list[ExternalLink]:
     """Найти внешние http/https ссылки в строке.
 
     Обнаруживает:
@@ -1980,7 +1988,7 @@ def find_external_links(line: str) -> List[ExternalLink]:
 
     Возвращает список ExternalLink с позициями в исходной строке.
     """
-    links: List[ExternalLink] = []
+    links: list[ExternalLink] = []
 
     # Markdown inline links
     for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line):
@@ -2030,7 +2038,7 @@ def open_url(url: str) -> None:
     saved_stderr = os.dup(2)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     opened = False
-    exc_info: Optional[Exception] = None
+    exc_info: Exception | None = None
     try:
         os.dup2(devnull_fd, 1)
         os.dup2(devnull_fd, 2)

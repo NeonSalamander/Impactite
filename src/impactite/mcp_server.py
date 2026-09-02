@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import functools
 import traceback
-from typing import Any, Callable, Coroutine, Dict, Optional
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -16,35 +17,61 @@ from impactite.core import Config, FileSystem, FullTextIndex, MarkdownParser, Ta
 from impactite.mcp_tools import McpContext, McpError
 from impactite.mcp_tools import (
     create_note as _create_note,
+)
+from impactite.mcp_tools import (
     fill_form as _fill_form,
+)
+from impactite.mcp_tools import (
     find_notes_by_date_range as _find_notes_by_date_range,
+)
+from impactite.mcp_tools import (
     fulltext_search as _fulltext_search,
+)
+from impactite.mcp_tools import (
     get_note as _get_note,
+)
+from impactite.mcp_tools import (
     get_note_statistics as _get_note_statistics,
+)
+from impactite.mcp_tools import (
     get_note_types as _get_note_types,
+)
+from impactite.mcp_tools import (
     get_notes_linked_to_project as _get_notes_linked_to_project,
+)
+from impactite.mcp_tools import (
     get_type_schema as _get_type_schema,
+)
+from impactite.mcp_tools import (
     list_notes as _list_notes,
+)
+from impactite.mcp_tools import (
     list_notes_by_type as _list_notes_by_type,
+)
+from impactite.mcp_tools import (
     search_notes as _search_notes,
+)
+from impactite.mcp_tools import (
     search_similar_notes as _search_similar_notes,
+)
+from impactite.mcp_tools import (
     update_note as _update_note,
 )
 
 mcp_app = FastMCP("impactite")
 
 # Populated by run_mcp before the server starts serving requests.
-_CTX: Optional[McpContext] = None
+_CTX: McpContext | None = None
 
 
-F = Callable[..., Coroutine[Any, Any, Dict[str, Any]]]
+F = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
 
 def _tool_handler(fn: F) -> F:
     """Wrap a tool handler so that errors are returned as JSON-compatible dicts."""
 
     @functools.wraps(fn)
-    async def wrapper(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    async def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
         try:
             return await fn(*args, **kwargs)
         except McpError as exc:
@@ -64,63 +91,63 @@ def _require_ctx() -> McpContext:
 
 @mcp_app.tool()
 @_tool_handler
-async def get_note(note_id: str) -> Dict[str, Any]:
+async def get_note(note_id: str) -> dict[str, Any]:
     """Read a single note."""
     return await _get_note(_require_ctx(), note_id=note_id)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def list_notes(filter: Optional[str] = None, type: Optional[str] = None) -> Dict[str, Any]:
+async def list_notes(filter: str | None = None, type: str | None = None) -> dict[str, Any]:
     """List notes with optional substring and type filters."""
     return await _list_notes(_require_ctx(), filter=filter, type=type)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def search_notes(query: str, type_filter: Optional[str] = None) -> Dict[str, Any]:
+async def search_notes(query: str, type_filter: str | None = None) -> dict[str, Any]:
     """Search notes by query with an optional type filter."""
     return await _search_notes(_require_ctx(), query=query, type_filter=type_filter)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def create_note(type: str, content: str, note_id: Optional[str] = None) -> Dict[str, Any]:
+async def create_note(type: str, content: str, note_id: str | None = None) -> dict[str, Any]:
     """Create a new note of a supported type."""
     return await _create_note(_require_ctx(), type=type, content=content, note_id=note_id)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def update_note(note_id: str, content: str, last_modified_at: Optional[int] = None) -> Dict[str, Any]:
+async def update_note(note_id: str, content: str, last_modified_at: int | None = None) -> dict[str, Any]:
     """Update the content of an existing note."""
     return await _update_note(_require_ctx(), note_id=note_id, content=content, last_modified_at=last_modified_at)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def fill_form(note_id: str, form_data: Dict[str, Any], last_modified_at: Optional[int] = None) -> Dict[str, Any]:
+async def fill_form(note_id: str, form_data: dict[str, Any], last_modified_at: int | None = None) -> dict[str, Any]:
     """Fill a form-type note with structured data."""
     return await _fill_form(_require_ctx(), note_id=note_id, form_data=form_data, last_modified_at=last_modified_at)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def get_note_types() -> Dict[str, Any]:
+async def get_note_types() -> dict[str, Any]:
     """Return the list of configured note types."""
     return await _get_note_types(_require_ctx())
 
 
 @mcp_app.tool()
 @_tool_handler
-async def get_type_schema(type_name: str) -> Dict[str, Any]:
+async def get_type_schema(type_name: str) -> dict[str, Any]:
     """Return the schema for a single note type."""
     return await _get_type_schema(_require_ctx(), type_name=type_name)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def list_notes_by_type(type: str) -> Dict[str, Any]:
+async def list_notes_by_type(type: str) -> dict[str, Any]:
     """Return all notes of a specific type."""
     return await _list_notes_by_type(_require_ctx(), type=type)
 
@@ -129,37 +156,37 @@ async def list_notes_by_type(type: str) -> Dict[str, Any]:
 @_tool_handler
 async def fulltext_search(
     query: str,
-    types: Optional[list[str]] = None,
-    date_range: Optional[Dict[str, Optional[int]]] = None,
-) -> Dict[str, Any]:
+    types: list[str] | None = None,
+    date_range: dict[str, int | None] | None = None,
+) -> dict[str, Any]:
     """Full-text search with optional type and date filters."""
     return await _fulltext_search(_require_ctx(), query=query, types=types, date_range=date_range)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def search_similar_notes(note_id: str, similarity_threshold: float = 0.0) -> Dict[str, Any]:
+async def search_similar_notes(note_id: str, similarity_threshold: float = 0.0) -> dict[str, Any]:
     """Find notes similar to a given note."""
     return await _search_similar_notes(_require_ctx(), note_id=note_id, similarity_threshold=similarity_threshold)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def get_note_statistics() -> Dict[str, Any]:
+async def get_note_statistics() -> dict[str, Any]:
     """Return aggregate vault statistics."""
     return await _get_note_statistics(_require_ctx())
 
 
 @mcp_app.tool()
 @_tool_handler
-async def find_notes_by_date_range(start: int, end: int) -> Dict[str, Any]:
+async def find_notes_by_date_range(start: int, end: int) -> dict[str, Any]:
     """Return notes modified within a Unix timestamp range."""
     return await _find_notes_by_date_range(_require_ctx(), start=start, end=end)
 
 
 @mcp_app.tool()
 @_tool_handler
-async def get_notes_linked_to_project(project_id: str) -> Dict[str, Any]:
+async def get_notes_linked_to_project(project_id: str) -> dict[str, Any]:
     """Return notes referencing a project or relationship identifier."""
     return await _get_notes_linked_to_project(_require_ctx(), project_id=project_id)
 

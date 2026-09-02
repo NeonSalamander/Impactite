@@ -15,13 +15,12 @@
 """
 
 from dataclasses import replace
-from typing import Dict
 
 SUPPORTED = ("en", "ru", "de")
 DEFAULT = "en"
 
 # Каталоги переводов: ключ — канонический английский текст.
-TRANSLATIONS: Dict[str, Dict[str, str]] = {
+TRANSLATIONS: dict[str, dict[str, str]] = {
     "ru": {
         # Виджеты / просмотр
         "No tags": "Нет тегов",
@@ -269,7 +268,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Directory color updated": "Verzeichnisfarbe aktualisiert",
         "Directory color reset": "Verzeichnisfarbe zurückgesetzt",
         "Color": "Farbe",
-        "Reset color": "Farbe zurücksetzen",
     },
 }
 
