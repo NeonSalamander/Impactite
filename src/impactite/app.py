@@ -49,6 +49,7 @@ from textual.widgets import (
 from textual.widgets._select import NoSelection
 from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
+from textual.widgets.tree import TreeNode
 
 from impactite.core import (
     Config,
@@ -73,7 +74,12 @@ from impactite.core import (
 from impactite.i18n import _, retranslate_bindings, set_language
 from impactite.table_engine import process_table_with_formulas
 from impactite.templater import build_context, collect_templates, render_template
-from impactite.todo_panel import TodoTree
+from impactite.todo_parser import (
+    TodoItem,
+    close_todo,
+    collect_open_todos,
+    find_note_files,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -185,18 +191,25 @@ class FileTree(Tree):
             self.y = y
             super().__init__()
 
-    def __init__(self, root_label: str, **kwargs):
-        super().__init__(root_label, **kwargs)
+    class TodoClosed(Message):
+        """Forwarded when a todo was successfully closed."""
+
+        def __init__(self, item: TodoItem) -> None:
+            self.item = item
+            super().__init__()
+
+    def __init__(self, **kwargs):
+        super().__init__("", **kwargs)
         self.directory_styles: dict[str, DirectoryStyle] = {}
         self.file_nodes: dict[int, Path] = {}
         self.dir_nodes: dict[int, Path] = {}
         self.root_path: Path | None = None
-        # Текущий выбранный каталог (для создания заметок/папок)
         self.selected_dir: Path | None = None
         self.graph_node_id: int | None = None
-        self.show_root = False
-        # Выбор узла не должен сворачивать/разворачивать каталог.
+        self.todos_node_id: int | None = None
+        self._todos_node: TreeNode | None = None
         self.auto_expand = False
+        self.show_root = False
 
     def populate_tree(
         self,
@@ -219,6 +232,9 @@ class FileTree(Tree):
         # Граф связей — предопределённый узел
         graph_node = self.root.add(_("🕸️ Link graph"), expand=False)
         self.graph_node_id = id(graph_node)
+
+        self._todos_node = self.root.add(_("📋 Open todos"), expand=False, data={"type": "todos-root"})
+        self.todos_node_id = id(self._todos_node)
 
         if favorites:
             existing: list[Path] = []
@@ -303,6 +319,47 @@ class FileTree(Tree):
                 node = parent_node.add(f"{icon} {child.name}")
                 self.file_nodes[id(node)] = child.path
 
+    def build_todos_branch(self) -> None:
+        """Populate (or refresh) the todo file/todo nodes under the todos root."""
+        root = self.root_path
+        if self._todos_node is None or root is None:
+            return
+        self._todos_node.remove_children()
+        todos = collect_open_todos(find_note_files(root))
+        if not todos:
+            self._todos_node.add(_("No open todos"), data={"type": "empty"})
+            return
+
+        grouped: dict[Path, list[TodoItem]] = {}
+        for item in todos:
+            grouped.setdefault(item.file_path, []).append(item)
+
+        for file_path, items in sorted(
+            grouped.items(),
+            key=lambda kv: str(kv[0].relative_to(root)).lower(),
+        ):
+            rel = file_path.relative_to(root)
+            file_node = self._todos_node.add(
+                f"📄 {rel.as_posix()}",
+                data={"type": "todo-file", "path": file_path},
+            )
+            for item in items:
+                file_node.add(
+                    item.line_text,
+                    data={"type": "todo", "item": item},
+                )
+
+    def get_selected_todo_item(self) -> TodoItem | None:
+        """Return the todo item under the cursor, if any."""
+        node = self.cursor_node
+        if node is None:
+            return None
+        data = node.data or {}
+        if data.get("type") != "todo":
+            return None
+        item: TodoItem | None = data.get("item")
+        return item
+
     def _directory_style_for_node(self, node: Any) -> DirectoryStyle | None:
         """Найти сохранённый стиль для узла-каталога."""
         if not self.directory_styles or not self.root_path:
@@ -366,12 +423,36 @@ class FileTree(Tree):
         node_id = id(event.node)
         if node_id == self.graph_node_id:
             self.post_message(self.GraphSelected())
+        elif node_id == self.todos_node_id:
+            event.node.expand()
+            self.build_todos_branch()
         elif node_id in self.file_nodes:
             # Каталог для создания — папка, в которой лежит выбранный файл
             self.selected_dir = self.file_nodes[node_id].parent
             self.post_message(self.FileSelected(self.file_nodes[node_id]))
         elif node_id in self.dir_nodes:
             self.selected_dir = self.dir_nodes[node_id]
+        elif event.node.data:
+            data = event.node.data
+            dtype = data.get("type")
+            if dtype == "todo-file":
+                path = data.get("path")
+                if isinstance(path, Path):
+                    self.post_message(self.FileSelected(path))
+            elif dtype == "todos-root":
+                event.node.expand()
+                self.build_todos_branch()
+
+    def on_key(self, event: events.Key) -> None:
+        """Close a selected todo on space; otherwise use the tree's default behavior."""
+        if event.key == "space":
+            item = self.get_selected_todo_item()
+            if item is not None:
+                event.stop()
+                if close_todo(item):
+                    self.post_message(self.TodoClosed(item))
+                else:
+                    self.notify(_("Could not close todo"), severity="error")
 
 
 class ToolButton(Static):
@@ -592,11 +673,13 @@ class MarkdownViewer(Static):
 
         lines = content.split("\n")
         self._line_highlights = self._find_highlights(lines, self._search_terms, current_match_index)
+
         self._current_match_line: int | None = None
         for lnum, hls in self._line_highlights.items():
-            if any(is_current for _, _, is_current in hls):
+            if any(is_current for _start, _end, is_current in hls):
                 self._current_match_line = lnum
                 break
+
         in_code_block = False
         code_lines = []
         code_language = ""
@@ -629,7 +712,7 @@ class MarkdownViewer(Static):
                         log.write(syntax)
                         height = max(1, len(code_lines))
                     # блок занимает примерно height визуальных строк
-                    for _ in range(height):
+                    for _idx in range(height):
                         self._tag_lines.append(None)
                         self._checkbox_lines.append(None)
                         self._link_lines.append(None)
@@ -647,7 +730,7 @@ class MarkdownViewer(Static):
                 if table:
                     self._render_table(log, table, lines, line_idx)
                     vis_height = len(table.rows) + 2
-                    for _ in range(vis_height):
+                    for _idx in range(vis_height):
                         self._tag_lines.append(None)
                         self._checkbox_lines.append(None)
                         self._link_lines.append(None)
@@ -2463,6 +2546,7 @@ class MarkdownEditorApp(App):
         Binding("c", "set_directory_color", "Color", show=False),
         Binding("shift+c", "reset_directory_color", "Reset color", show=False),
         Binding("backspace", "go_back", "Back", show=False),
+        Binding("space", "close_todo", "Close todo", show=False),
         Binding("f4", "open_todos", "Open todos", show=True),
     ]
 
@@ -2764,22 +2848,14 @@ class MarkdownEditorApp(App):
         height: 1fr;
     }
 
-    #todos-panel {
-        display: none;
-        height: 1fr;
-        padding: 0;
-        background: $background;
-    }
-
     #todos-tree {
-        display: none;
         height: 1fr;
-        padding: 0;
-        background: $background;
+        padding: 0 1;
+        background: transparent;
     }
 
     #todos-tree Tree {
-        padding: 0 1;
+        padding: 0;
         height: 1fr;
     }
 
@@ -3266,7 +3342,7 @@ class MarkdownEditorApp(App):
                     fav_btn = ToolButton("⭐", id="toggle-fav-btn", classes="sidebar-btn")
                     fav_btn.tooltip = _("Toggle favorite")
                     yield fav_btn
-                yield FileTree("Файлы", id="file-tree")
+                yield FileTree(id="file-tree")
                 with Vertical(id="tag-cloud-container"):
                     yield Label(f"[bold]{_('Tags')}[/bold]")
                     yield TagCloud(id="tag-cloud")
@@ -3282,7 +3358,6 @@ class MarkdownEditorApp(App):
                 yield FormView(id="form-view")
                 yield BaseView(id="base-view")
                 yield LinkGraphTree(id="graph-view")
-                yield TodoTree(self.file_system.root_path, id="todos-tree")
 
         yield Static("", id="status-bar")
         yield Footer()
@@ -3306,7 +3381,6 @@ class MarkdownEditorApp(App):
         self.query_one("#form-view", FormView).display = False
         self.query_one("#base-view", BaseView).display = False
         self.query_one("#graph-view", LinkGraphTree).display = False
-        self.query_one("#todos-tree", TodoTree).display = False
         self.query_one("#search-view", SearchView).display = False
         self._set_sidebar_mode("files")
         self._register_markdown_highlights(editor)
@@ -3730,36 +3804,35 @@ class MarkdownEditorApp(App):
         self._update_status()
 
     def show_todos(self) -> None:
-        """Show the open todos panel."""
-        self._clear_main_area(exclude={"todos-tree"})
-        tree = self.query_one("#todos-tree", TodoTree)
-        tree.display = True
-        tree.build()
-        tree.focus()
-        self.title = "Impactite — " + _("Open todos")
-        self._update_status()
+        """Focus the todos branch in the file tree."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        todos_node = file_tree._todos_node
+        if todos_node is not None:
+            todos_node.expand()
+            file_tree.build_todos_branch()
+            file_tree.select_node(todos_node)
+            file_tree.focus()
 
     def action_open_todos(self) -> None:
-        """Toggle the open todos panel."""
-        tree = self.query_one("#todos-tree", TodoTree)
-        if tree.display:
-            self._switch_to_view()
-        else:
-            self.show_todos()
+        """Focus the todos node in the file tree."""
+        self.show_todos()
 
-    def on_todo_tree_file_selected(self, event: TodoTree.FileSelected) -> None:
-        """Open the originating note from the todo tree."""
-        if event.path.exists() and event.path.is_file():
-            self._navigate_to(event.path)
-        else:
-            self.notify(_("File not found: {path}", path=str(event.path)), severity="error")
-
-    def on_todo_tree_todo_closed(self, event: TodoTree.TodoClosed) -> None:
-        """Refresh the todo tree after a todo was closed."""
-        tree = self.query_one("#todos-tree", TodoTree)
-        tree.remove_todo(event.item.id)
+    def on_file_tree_todo_closed(self, event: FileTree.TodoClosed) -> None:
+        """Refresh the todo branch after a todo was closed."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        file_tree.build_todos_branch()
         self._rebuild_tag_cache()
         self._update_tag_cloud()
+
+    def action_close_todo(self) -> None:
+        """Close the currently selected todo in the file tree."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        item = file_tree.get_selected_todo_item()
+        if item is not None:
+            if close_todo(item):
+                file_tree.post_message(FileTree.TodoClosed(item))
+            else:
+                self.notify(_("Could not close todo"), severity="error")
 
     def on_link_graph_tree_note_selected(self, event: LinkGraphTree.NoteSelected) -> None:
         """Открыть заметку из дерева связей."""
@@ -4333,7 +4406,6 @@ class MarkdownEditorApp(App):
             "#form-view": FormView,
             "#base-view": BaseView,
             "#graph-view": LinkGraphTree,
-            "#todos-tree": TodoTree,
         }
         for selector, widget_type in targets.items():
             if selector[1:] in exclude:
