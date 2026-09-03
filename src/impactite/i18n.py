@@ -52,8 +52,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # Несохранённые изменения
         "Don't save": "Не сохранять",
         "Unsaved changes": "Несохранённые изменения",
-        "Save changes before leaving the editor?":
-            "Сохранить изменения перед выходом из редактора?",
+        "Save changes before leaving the editor?": "Сохранить изменения перед выходом из редактора?",
         # Создание каталога / заметки
         "Create folder": "Создать каталог",
         "Create note": "Создать заметку",
@@ -145,7 +144,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "Directory color reset": "Цвет каталога сброшен",
         "Color": "Цвет",
         # TODO-панель
-        "Open todos": "Список задач",
+        "Open todos": "Открытые задачи",
         "No open todos": "Нет открытых задач",
         "Could not close todo": "Не удалось закрыть задачу",
     },
@@ -180,8 +179,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # Несохранённые изменения
         "Don't save": "Nicht speichern",
         "Unsaved changes": "Ungespeicherte Änderungen",
-        "Save changes before leaving the editor?":
-            "Änderungen vor dem Verlassen des Editors speichern?",
+        "Save changes before leaving the editor?": "Änderungen vor dem Verlassen des Editors speichern?",
         # Создание каталога / заметки
         "Create folder": "Ordner erstellen",
         "Create note": "Notiz erstellen",
@@ -323,7 +321,4 @@ def retranslate_bindings(obj) -> None:
     if not key_to_bindings:
         return
     for key, blist in key_to_bindings.items():
-        key_to_bindings[key] = [
-            replace(b, description=t(b.description)) if b.description else b
-            for b in blist
-        ]
+        key_to_bindings[key] = [replace(b, description=t(b.description)) if b.description else b for b in blist]

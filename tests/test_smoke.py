@@ -1,4 +1,5 @@
 """Smoke tests for the Impactite package."""
+
 from __future__ import annotations
 
 from impactite import Config, FileSystem, MarkdownParser, TagIndex, main, t

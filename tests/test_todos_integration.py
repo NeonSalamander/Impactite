@@ -1,4 +1,5 @@
 """End-to-end tests for the todo branch inside the file tree."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,15 +24,11 @@ async def todos_app(tmp_path: Path):
     root = tmp_path / "notes"
     root.mkdir()
     (root / "project.md").write_text(
-        "# Project\n\n"
-        "- [ ] top level todo\n"
-        "- [x] done todo\n"
-        "  - [ ] nested todo\n",
+        "# Project\n\n- [ ] top level todo\n- [x] done todo\n  - [ ] nested todo\n",
         encoding="utf-8",
     )
     (root / "inbox.md").write_text(
-        "- [ ] inbox one\n"
-        "- [ ] inbox two\n",
+        "- [ ] inbox one\n- [ ] inbox two\n",
         encoding="utf-8",
     )
     (root / "Inbox").mkdir()
@@ -49,8 +46,7 @@ async def todos_app(tmp_path: Path):
     notes_sub = root / "notes"
     notes_sub.mkdir()
     (notes_sub / "Project.md").write_text(
-        "# Project\n\n"
-        "- [ ] project todo\n",
+        "# Project\n\n- [ ] project todo\n",
         encoding="utf-8",
     )
     config = Config(notes_path=str(root), language="en")

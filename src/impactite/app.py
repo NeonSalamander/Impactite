@@ -83,10 +83,16 @@ from impactite.todo_parser import (
 
 _log = logging.getLogger(__name__)
 
-_LIGHT_THEMES: frozenset[str] = frozenset({
-    "textual-light", "solarized-light", "catppuccin-latte",
-    "rose-pine-dawn", "atom-one-light", "w311",
-})
+_LIGHT_THEMES: frozenset[str] = frozenset(
+    {
+        "textual-light",
+        "solarized-light",
+        "catppuccin-latte",
+        "rose-pine-dawn",
+        "atom-one-light",
+        "w311",
+    }
+)
 
 # TurboVision-inspired theme.
 TV_THEME: Theme = Theme(
@@ -181,7 +187,6 @@ class FileTree(Tree):
     class GraphSelected(Message):
         """Сообщение о выборе графа связей."""
 
-
     class DirectoryContextMenuRequested(Message):
         """Сообщение о запросе контекстного меню для каталога."""
 
@@ -196,6 +201,12 @@ class FileTree(Tree):
 
         def __init__(self, item: TodoItem) -> None:
             self.item = item
+            super().__init__()
+
+    class TodosNodeSelected(Message):
+        """Signal that the predefined todos navigation node was selected."""
+
+        def __init__(self) -> None:
             super().__init__()
 
     def __init__(self, **kwargs):
@@ -230,10 +241,10 @@ class FileTree(Tree):
         self.root.expand()
 
         # Граф связей — предопределённый узел
-        graph_node = self.root.add(_("🕸️ Link graph"), expand=False)
+        graph_node = self.root.add(_("Link graph"), expand=False)
         self.graph_node_id = id(graph_node)
 
-        self._todos_node = self.root.add(_("📋 Open todos"), expand=False, data={"type": "todos-root"})
+        self._todos_node = self.root.add(_("Open todos"), expand=False, data={"type": "todos-root"})
         self.todos_node_id = id(self._todos_node)
 
         if favorites:
@@ -316,7 +327,7 @@ class FileTree(Tree):
                 self._add_nodes(dir_node, child)
             else:
                 icon = "📄" if child.name.endswith(".md") else "📎"
-                node = parent_node.add(f"{icon} {child.name}")
+                node = parent_node.add(f"{icon} {child.name}", data=child.path)
                 self.file_nodes[id(node)] = child.path
 
     def build_todos_branch(self) -> None:
@@ -329,6 +340,8 @@ class FileTree(Tree):
         if not todos:
             self._todos_node.add(_("No open todos"), data={"type": "empty"})
             return
+
+        self._todos_node.set_label(_("Open todos"))
 
         grouped: dict[Path, list[TodoItem]] = {}
         for item in todos:
@@ -413,10 +426,23 @@ class FileTree(Tree):
         self.cursor_line = line
         self.select_node(node)
         self.selected_dir = node.data
-        self.post_message(
-            self.DirectoryContextMenuRequested(node.data, event.screen_x, event.screen_y)
-        )
+        self.post_message(self.DirectoryContextMenuRequested(node.data, event.screen_x, event.screen_y))
         event.stop()
+
+    def _node_line(self, node: TreeNode | None) -> int:
+        """Return the rendered line index for ``node``, or -1."""
+        if node is None:
+            return -1
+        for i, line in enumerate(self._tree_lines):
+            if line.node is node:
+                return i
+        return -1
+
+    def highlight_node(self, node: TreeNode | None) -> None:
+        """Move the cursor to ``node`` without emitting a selection event."""
+        line = self._node_line(node)
+        if line >= 0:
+            self.cursor_line = line
 
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """Обработать выбор узла."""
@@ -426,6 +452,7 @@ class FileTree(Tree):
         elif node_id == self.todos_node_id:
             event.node.expand()
             self.build_todos_branch()
+            self.post_message(self.TodosNodeSelected())
         elif node_id in self.file_nodes:
             # Каталог для создания — папка, в которой лежит выбранный файл
             self.selected_dir = self.file_nodes[node_id].parent
@@ -538,12 +565,12 @@ class MarkdownViewer(Static):
     can_focus = True
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("up",       "scroll_up",   show=False),
-        Binding("down",     "scroll_down", show=False),
-        Binding("pageup",   "page_up",     show=False),
-        Binding("pagedown", "page_down",   show=False),
-        Binding("home",     "scroll_home", show=False),
-        Binding("end",      "scroll_end",  show=False),
+        Binding("up", "scroll_up", show=False),
+        Binding("down", "scroll_down", show=False),
+        Binding("pageup", "page_up", show=False),
+        Binding("pagedown", "page_down", show=False),
+        Binding("home", "scroll_home", show=False),
+        Binding("end", "scroll_end", show=False),
     ]
 
     class TagClicked(Message):
@@ -585,17 +612,28 @@ class MarkdownViewer(Static):
         yield ViewerLog(markup=True, highlight=False, wrap=True)
         yield BacklinksPanel(id="backlinks-panel")
 
-    def action_scroll_up(self)   -> None: self.query_one(ViewerLog).scroll_up()
-    def action_scroll_down(self) -> None: self.query_one(ViewerLog).scroll_down()
-    def action_page_up(self)     -> None: self.query_one(ViewerLog).scroll_page_up()
-    def action_page_down(self)   -> None: self.query_one(ViewerLog).scroll_page_down()
-    def action_scroll_home(self) -> None: self.query_one(ViewerLog).scroll_home()
-    def action_scroll_end(self)  -> None: self.query_one(ViewerLog).scroll_end()
+    def action_scroll_up(self) -> None:
+        self.query_one(ViewerLog).scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self.query_one(ViewerLog).scroll_down()
+
+    def action_page_up(self) -> None:
+        self.query_one(ViewerLog).scroll_page_up()
+
+    def action_page_down(self) -> None:
+        self.query_one(ViewerLog).scroll_page_down()
+
+    def action_scroll_home(self) -> None:
+        self.query_one(ViewerLog).scroll_home()
+
+    def action_scroll_end(self) -> None:
+        self.query_one(ViewerLog).scroll_end()
 
     def on_viewer_log_clicked(self, event: ViewerLog.Clicked) -> None:
         """Обработать клик по тексту заметки — ссылка, чекбокс или тег."""
         log = self.query_one(ViewerLog)
-        cr = log.content_region          # абсолютные экранные координаты контента
+        cr = log.content_region  # абсолютные экранные координаты контента
         line_idx = event.screen_y - cr.y + int(log.scroll_y)
         if not (0 <= line_idx < len(self._tag_lines)):
             return
@@ -739,27 +777,52 @@ class MarkdownViewer(Static):
                     continue
 
             # Чекбоксы
-            cb_match = re.match(r'^(\s*)([-*])\s+\[([ xX])\]\s+(.*)', line)
+            cb_match = re.match(r"^(\s*)([-*])\s+\[([ xX])\]\s+(.*)", line)
             if cb_match:
                 indent_str, _bullet, checked, text = cb_match.groups()
-                is_checked = checked.lower() == 'x'
+                is_checked = checked.lower() == "x"
                 prefix_spaces = " " * len(indent_str)
-                checkbox_display = f"[bold green]{escape('[x]')}[/bold green]" if is_checked else f"[bold red]{escape('[ ]')}[/bold red]"
+                checkbox_display = (
+                    f"[bold green]{escape('[x]')}[/bold green]"
+                    if is_checked
+                    else f"[bold red]{escape('[ ]')}[/bold red]"
+                )
                 pre_len = len(indent_str) + 3 + 1  # indent + [x]/[ ] + space
-                formatted_text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(text, line_idx, pre_len))
+                formatted_text, int_links, ext_links = self._process_formatting_inline(
+                    self._apply_highlights_range(text, line_idx, pre_len)
+                )
                 log.write(f"{prefix_spaces}{checkbox_display} {formatted_text}")
                 cb_start = len(prefix_spaces)
                 cb_end = cb_start + 3
                 offset = len(prefix_spaces) + 4
-                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
-                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
-                self._checkbox_lines.append({
-                    "source_line": line_idx,
-                    "cb_start": cb_start,
-                    "cb_end": cb_end,
-                })
+                link_data = (
+                    [
+                        {
+                            "start": l["start"] + offset,
+                            "end": l["end"] + offset,
+                            "target": l["target"],
+                            "text": l["text"],
+                        }
+                        for l in int_links
+                    ]
+                    if int_links
+                    else None
+                )
+                ext_data = (
+                    [
+                        {"start": l["start"] + offset, "end": l["end"] + offset, "url": l["url"], "text": l["text"]}
+                        for l in ext_links
+                    ]
+                    if ext_links
+                    else None
+                )
+                self._checkbox_lines.append(
+                    {
+                        "source_line": line_idx,
+                        "cb_start": cb_start,
+                        "cb_end": cb_end,
+                    }
+                )
                 self._tag_lines.append(None)
                 self._link_lines.append(link_data)
                 self._external_link_lines.append(ext_data)
@@ -786,13 +849,32 @@ class MarkdownViewer(Static):
                 self._external_link_lines.append(None)
             # Списки
             elif line.startswith(("- ", "* ")):
-                text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
+                text, int_links, ext_links = self._process_formatting_inline(
+                    self._apply_highlights_range(line[2:], line_idx, 2)
+                )
                 log.write(f"  • {text}")
                 offset = 4
-                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
-                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
+                link_data = (
+                    [
+                        {
+                            "start": l["start"] + offset,
+                            "end": l["end"] + offset,
+                            "target": l["target"],
+                            "text": l["text"],
+                        }
+                        for l in int_links
+                    ]
+                    if int_links
+                    else None
+                )
+                ext_data = (
+                    [
+                        {"start": l["start"] + offset, "end": l["end"] + offset, "url": l["url"], "text": l["text"]}
+                        for l in ext_links
+                    ]
+                    if ext_links
+                    else None
+                )
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
@@ -802,26 +884,64 @@ class MarkdownViewer(Static):
                 if match:
                     num = match.group(1)
                     prefix_len = len(num) + 2  # "N. "
-                    text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(match.group(2), line_idx, prefix_len))
+                    text, int_links, ext_links = self._process_formatting_inline(
+                        self._apply_highlights_range(match.group(2), line_idx, prefix_len)
+                    )
                     log.write(f"  {num}. {text}")
                     offset = len(f"  {num}. ")
-                    link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                                  "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
-                    ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                                 "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
+                    link_data = (
+                        [
+                            {
+                                "start": l["start"] + offset,
+                                "end": l["end"] + offset,
+                                "target": l["target"],
+                                "text": l["text"],
+                            }
+                            for l in int_links
+                        ]
+                        if int_links
+                        else None
+                    )
+                    ext_data = (
+                        [
+                            {"start": l["start"] + offset, "end": l["end"] + offset, "url": l["url"], "text": l["text"]}
+                            for l in ext_links
+                        ]
+                        if ext_links
+                        else None
+                    )
                     self._tag_lines.append(None)
                     self._checkbox_lines.append(None)
                     self._link_lines.append(link_data)
                     self._external_link_lines.append(ext_data)
             # Цитаты
             elif line.startswith("> "):
-                text, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line[2:], line_idx, 2))
+                text, int_links, ext_links = self._process_formatting_inline(
+                    self._apply_highlights_range(line[2:], line_idx, 2)
+                )
                 log.write(f"[italic yellow]  {text}[/italic yellow]")
                 offset = 2
-                link_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
-                ext_data = [{"start": l["start"] + offset, "end": l["end"] + offset,
-                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
+                link_data = (
+                    [
+                        {
+                            "start": l["start"] + offset,
+                            "end": l["end"] + offset,
+                            "target": l["target"],
+                            "text": l["text"],
+                        }
+                        for l in int_links
+                    ]
+                    if int_links
+                    else None
+                )
+                ext_data = (
+                    [
+                        {"start": l["start"] + offset, "end": l["end"] + offset, "url": l["url"], "text": l["text"]}
+                        for l in ext_links
+                    ]
+                    if ext_links
+                    else None
+                )
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
@@ -854,12 +974,23 @@ class MarkdownViewer(Static):
                 self._external_link_lines.append(None)
             # Inline-форматирование и внешние ссылки
             elif any(m in line for m in ("**", "__", "~~", "*", "_[", "](")) or "http://" in line or "https://" in line:
-                formatted, int_links, ext_links = self._process_formatting_inline(self._apply_highlights_range(line, line_idx, 0))
+                formatted, int_links, ext_links = self._process_formatting_inline(
+                    self._apply_highlights_range(line, line_idx, 0)
+                )
                 log.write(formatted)
-                link_data = [{"start": l["start"], "end": l["end"],
-                              "target": l["target"], "text": l["text"]} for l in int_links] if int_links else None
-                ext_data = [{"start": l["start"], "end": l["end"],
-                             "url": l["url"], "text": l["text"]} for l in ext_links] if ext_links else None
+                link_data = (
+                    [
+                        {"start": l["start"], "end": l["end"], "target": l["target"], "text": l["text"]}
+                        for l in int_links
+                    ]
+                    if int_links
+                    else None
+                )
+                ext_data = (
+                    [{"start": l["start"], "end": l["end"], "url": l["url"], "text": l["text"]} for l in ext_links]
+                    if ext_links
+                    else None
+                )
                 self._tag_lines.append(None)
                 self._checkbox_lines.append(None)
                 self._link_lines.append(link_data)
@@ -931,7 +1062,9 @@ class MarkdownViewer(Static):
             if header_row is not None and src_indices:
                 header_line = lines[src_indices[0]]
                 offset = _cell_offset(header_line, c, header)
-            highlighted_header = self._apply_highlights_range(rich_escape(header), src_indices[0] if src_indices else 0, offset)
+            highlighted_header = self._apply_highlights_range(
+                rich_escape(header), src_indices[0] if src_indices else 0, offset
+            )
             rich_table.add_column(Text.from_markup(highlighted_header))
 
         start = 1 if table.has_header else 0
@@ -965,14 +1098,14 @@ class MarkdownViewer(Static):
         external_links: list = []
 
         # Защита inline-кода: не делать ссылками URL внутри `...`
-        code_spans = list(re.finditer(r'`[^`]+`', line))
+        code_spans = list(re.finditer(r"`[^`]+`", line))
 
         def _inside_code(pos: int) -> bool:
             return any(span.start() < pos < span.end() for span in code_spans)
 
         # Markdown inline links + raw URLs, объединённые по позиции
         matches: list[tuple[int, int, str, tuple]] = []
-        md_iter = re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', line)
+        md_iter = re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", line)
         for match in md_iter:
             if _inside_code(match.start()) or _inside_code(match.end()):
                 continue
@@ -1005,23 +1138,27 @@ class MarkdownViewer(Static):
             text, target = payload
             start_pos = sum(len(p) for p in parts)
             if kind == "internal":
-                internal_links.append({
-                    "start": start_pos,
-                    "end": start_pos + len(text) - 1,
-                    "target": target,
-                    "text": text,
-                })
+                internal_links.append(
+                    {
+                        "start": start_pos,
+                        "end": start_pos + len(text) - 1,
+                        "target": target,
+                        "text": text,
+                    }
+                )
             else:
-                external_links.append({
-                    "start": start_pos,
-                    "end": start_pos + len(text) - 1,
-                    "url": target,
-                    "text": text,
-                })
-            parts.append(f'[underline blue]{text}[/underline blue]')
+                external_links.append(
+                    {
+                        "start": start_pos,
+                        "end": start_pos + len(text) - 1,
+                        "url": target,
+                        "text": text,
+                    }
+                )
+            parts.append(f"[underline blue]{text}[/underline blue]")
             last_end = end
         parts.append(line[last_end:])
-        line = ''.join(parts)
+        line = "".join(parts)
 
         # **жирный**
         line = re.sub(r"\*\*(.+?)\*\*", r"[bold]\1[/bold]", line)
@@ -1058,9 +1195,7 @@ class MarkdownViewer(Static):
                 highlights[lnum] = hl
         return highlights
 
-    def _apply_highlights_range(
-        self, text: str, line_idx: int, offset: int
-    ) -> str:
+    def _apply_highlights_range(self, text: str, line_idx: int, offset: int) -> str:
         """Подсветить только часть строки, начинающуюся с offset."""
         hl_all = sorted(self._line_highlights.get(line_idx, []))
         if not hl_all:
@@ -1208,8 +1343,7 @@ class FormView(VerticalScroll):
         if ftype == "integer":
             return Input(placeholder="0", type="integer", id=wid, classes="field-widget")
         if ftype == "date":
-            return Input(placeholder=_("YYYY-MM-DD"), restrict=r"[\d\-]*",
-                         id=wid, classes="field-widget")
+            return Input(placeholder=_("YYYY-MM-DD"), restrict=r"[\d\-]*", id=wid, classes="field-widget")
         if ftype == "list":
             mode = str(info[2]).lower() if len(info) > 2 else ""
             options = info[3] if len(info) > 3 and isinstance(info[3], list) else []
@@ -1217,16 +1351,18 @@ class FormView(VerticalScroll):
             if mode == "multi-select":
                 return SelectionList(
                     *[Selection(o, o) for o in opts],
-                    id=wid, classes="field-widget field-multiselect",
+                    id=wid,
+                    classes="field-widget field-multiselect",
                 )
             if mode == "select":
                 return Select(
-                    [(o, o) for o in opts], allow_blank=True,
-                    id=wid, classes="field-widget",
+                    [(o, o) for o in opts],
+                    allow_blank=True,
+                    id=wid,
+                    classes="field-widget",
                 )
             # обычный список через свободный ввод
-            return Input(placeholder=_("value1, value2 ..."),
-                         id=wid, classes="field-widget")
+            return Input(placeholder=_("value1, value2 ..."), id=wid, classes="field-widget")
         # string
         length = int(info[2]) if len(info) > 2 and str(info[2]).isdigit() else 0
         kw = {"max_length": length} if length > 0 else {}
@@ -1257,9 +1393,7 @@ class FormView(VerticalScroll):
                             values[name] = None if isinstance(sel, NoSelection) else sel
                         else:
                             raw = self.query_one(wid, Input).value
-                            values[name] = [
-                                i.strip() for i in re.split(r"[,\s]+", raw) if i.strip()
-                            ]
+                            values[name] = [i.strip() for i in re.split(r"[,\s]+", raw) if i.strip()]
                     else:
                         values[name] = self.query_one(wid, Input).value
                 except Exception:
@@ -1371,8 +1505,7 @@ class BaseView(VerticalScroll):
         """Создать компактный виджет для одного фильтра."""
         wid = f"base-filter-{name}"
         if ftype == "string":
-            return Input(placeholder=_("contains..."), id=wid,
-                         classes="base-filter-widget base-filter-string")
+            return Input(placeholder=_("contains..."), id=wid, classes="base-filter-widget base-filter-string")
         if ftype == "multi-select":
             options = info[1] if len(info) > 1 else []
             opts: list = []
@@ -1387,29 +1520,24 @@ class BaseView(VerticalScroll):
                         allow_blank=True,
                         prompt=name,
                         compact=True,
-                        id=wid, classes="base-filter-widget base-filter-select",
+                        id=wid,
+                        classes="base-filter-widget base-filter-select",
                     ),
                     Static("", id=f"{wid}-display", classes="base-filter-display"),
                 ]
-            return Input(placeholder=_("contains..."), id=wid,
-                         classes="base-filter-widget base-filter-string")
+            return Input(placeholder=_("contains..."), id=wid, classes="base-filter-widget base-filter-string")
         if ftype == "integer":
             return [
-                Input(placeholder=_("min"), type="integer",
-                      id=f"{wid}-min", classes="base-filter-number"),
-                Input(placeholder=_("max"), type="integer",
-                      id=f"{wid}-max", classes="base-filter-number"),
+                Input(placeholder=_("min"), type="integer", id=f"{wid}-min", classes="base-filter-number"),
+                Input(placeholder=_("max"), type="integer", id=f"{wid}-max", classes="base-filter-number"),
             ]
         if ftype == "date":
             return [
-                Input(placeholder=_("from"),
-                      id=f"{wid}-from", classes="base-filter-date"),
-                Input(placeholder=_("to"),
-                      id=f"{wid}-to", classes="base-filter-date"),
+                Input(placeholder=_("from"), id=f"{wid}-from", classes="base-filter-date"),
+                Input(placeholder=_("to"), id=f"{wid}-to", classes="base-filter-date"),
             ]
         # fallback
-        return Input(placeholder=_("contains..."), id=wid,
-                     classes="base-filter-widget base-filter-string")
+        return Input(placeholder=_("contains..."), id=wid, classes="base-filter-widget base-filter-string")
 
     def _collect_filter_values(self) -> dict:
         """Собрать текущие значения фильтров."""
@@ -1544,8 +1672,7 @@ class BaseView(VerticalScroll):
             log.write(f"[italic dim]{_('Query returned no data')}[/italic dim]")
             return
 
-        table = Table(expand=False, header_style="bold magenta", border_style="dim",
-                      show_lines=True)
+        table = Table(expand=False, header_style="bold magenta", border_style="dim", show_lines=True)
         for col in self._columns:
             table.add_column(str(col))
         for row in rows:
@@ -1577,7 +1704,7 @@ class BaseView(VerticalScroll):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id and event.select.id.startswith("base-filter-"):
-            name = event.select.id[len("base-filter-"):]
+            name = event.select.id[len("base-filter-") :]
             for fd in self._filter_defs:
                 if not isinstance(fd, dict):
                     continue
@@ -1666,10 +1793,10 @@ class BaseView(VerticalScroll):
         widget = event.control
         if widget and widget.id:
             if widget.id.startswith("base-filter-reset-"):
-                name = widget.id[len("base-filter-reset-"):]
+                name = widget.id[len("base-filter-reset-") :]
                 self._reset_filter(name)
             elif widget.id.startswith("base-filter-mode-"):
-                name = widget.id[len("base-filter-mode-"):]
+                name = widget.id[len("base-filter-mode-") :]
                 self._toggle_multi_select_mode(name)
 
     def _open_note_at(self, log: RichLog, x: int, y: int) -> None:
@@ -1740,6 +1867,133 @@ class BaseView(VerticalScroll):
                 _log.debug("Suppressed exception", exc_info=_exc)
             break
         self._apply_filters()
+
+
+class TodosTree(Tree):
+    """Tree used inside TodosView; space closes a selected todo."""
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("space", "close_todo", "Close todo", show=False, priority=True),
+    ]
+
+    class TodoClosed(Message):
+        """Forwarded when a todo was successfully closed."""
+
+        def __init__(self, item: TodoItem) -> None:
+            self.item = item
+            super().__init__()
+
+    def __init__(self, label: str, **kwargs) -> None:
+        super().__init__(label, **kwargs)
+        self.show_root = True
+
+    def action_close_todo(self) -> None:
+        """Close the todo under the cursor or fall back to toggling the node."""
+        node = self.cursor_node
+        if node is None:
+            return
+        data = node.data or {}
+        item: TodoItem | None = data.get("item") if data.get("type") == "todo" else None
+        if item is not None:
+            if close_todo(item):
+                # Bubble the parent view's message type so the App handler fires.
+                self.post_message(TodosView.TodoClosed(item))
+            else:
+                self.notify(_("Could not close todo"), severity="error")
+        else:
+            self.action_toggle_node()
+
+
+class TodosView(Vertical):
+    """Right-pane view that lists open todos grouped by file."""
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("space", "close_todo", "Close todo", show=False),
+    ]
+
+    class NoteSelected(Message):
+        """Forwarded when the user selects a todo-file node."""
+
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            super().__init__()
+
+    class TodoClosed(Message):
+        """Forwarded when a todo was successfully closed."""
+
+        def __init__(self, item: TodoItem) -> None:
+            self.item = item
+            super().__init__()
+
+    def compose(self) -> ComposeResult:
+        yield TodosTree(_("Open todos"), id="todos-view-tree")
+
+    def build_todos(self, root_path: Path | None) -> None:
+        """Populate the tree with open todos grouped by file."""
+        tree = self.query_one("#todos-view-tree", TodosTree)
+        tree.clear()
+        if root_path is None:
+            tree.root.add(_("No open todos"))
+            return
+        todos = collect_open_todos(find_note_files(root_path))
+        if not todos:
+            tree.root.add(_("No open todos"))
+            return
+
+        grouped: dict[Path, list[TodoItem]] = {}
+        for item in todos:
+            grouped.setdefault(item.file_path, []).append(item)
+
+        for file_path, items in sorted(
+            grouped.items(),
+            key=lambda kv: str(kv[0].relative_to(root_path)).lower(),
+        ):
+            rel = file_path.relative_to(root_path)
+            file_node = tree.root.add(
+                f"📄 {rel.as_posix()}",
+                data={"type": "todo-file", "path": file_path},
+            )
+            for item in items:
+                file_node.add(
+                    item.line_text,
+                    data={"type": "todo", "item": item},
+                )
+
+    def get_selected_todo_item(self) -> TodoItem | None:
+        """Return the todo item under the cursor, if any."""
+        tree = self.query_one("#todos-view-tree", TodosTree)
+        node = tree.cursor_node
+        if node is None:
+            return None
+        data = node.data or {}
+        if data.get("type") != "todo":
+            return None
+        item: TodoItem | None = data.get("item")
+        return item
+
+    def action_close_todo(self) -> None:
+        """Close the currently selected todo (used by the app-level binding)."""
+        item = self.get_selected_todo_item()
+        if item is None:
+            return
+        if close_todo(item):
+            self.post_message(self.TodoClosed(item))
+        else:
+            self.notify(_("Could not close todo"), severity="error")
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if not data:
+            return
+        dtype = data.get("type")
+        if dtype == "todo-file":
+            path = data.get("path")
+            if isinstance(path, Path):
+                self.post_message(self.NoteSelected(path))
+        elif dtype == "todo":
+            item: TodoItem | None = data.get("item")
+            if item is not None:
+                self.post_message(self.NoteSelected(item.file_path))
 
 
 class LinkGraphTree(Tree):
@@ -2116,8 +2370,13 @@ class TagSearchModal(ModalScreen):
             self.path = path
             super().__init__()
 
-    def __init__(self, all_tags: dict[str, list[Path]], initial_query: str = "",
-                 tag_colors: dict[str, str] | None = None, **kwargs):
+    def __init__(
+        self,
+        all_tags: dict[str, list[Path]],
+        initial_query: str = "",
+        tag_colors: dict[str, str] | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.all_tags = all_tags
         self.initial_query = initial_query
@@ -2160,9 +2419,7 @@ class TagSearchModal(ModalScreen):
             for i, (tag, path) in enumerate(self.current_results):
                 color = self.tag_colors.get(tag, "")
                 tag_text = f"[{color}]#{tag}[/{color}]" if color else f"#{tag}"
-                results_widget.add_option(
-                    Option(f"{tag_text}  —  {path.name}", id=f"f{i}")
-                )
+                results_widget.add_option(Option(f"{tag_text}  —  {path.name}", id=f"f{i}"))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_id and event.option_id.startswith("f"):
@@ -2185,9 +2442,9 @@ class UnsavedChangesModal(ModalScreen):
     """Диалог несохранённых изменений."""
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("escape", "discard",      "Don't save"),
-        Binding("left",   "prev_button",  show=False),
-        Binding("right",  "next_button",  show=False),
+        Binding("escape", "discard", "Don't save"),
+        Binding("left", "prev_button", show=False),
+        Binding("right", "next_button", show=False),
     ]
 
     class Save(Message):
@@ -2309,10 +2566,22 @@ class DirectoryColorModal(ModalScreen[tuple[str, str] | None]):
                 self.post_message(self.Focused(self.id))
 
     _COLOR_PRESETS: ClassVar[list[str]] = [
-        "#000000", "#ffffff", "#808080", "#ff0000",
-        "#00ff00", "#0000ff", "#ffff00", "#ff00ff",
-        "#00ffff", "#8b0000", "#006400", "#00008b",
-        "#ffa500", "#800080", "#008080", "#ffc0cb",
+        "#000000",
+        "#ffffff",
+        "#808080",
+        "#ff0000",
+        "#00ff00",
+        "#0000ff",
+        "#ffff00",
+        "#ff00ff",
+        "#00ffff",
+        "#8b0000",
+        "#006400",
+        "#00008b",
+        "#ffa500",
+        "#800080",
+        "#008080",
+        "#ffc0cb",
     ]
 
     BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
@@ -2457,9 +2726,7 @@ class TemplateSelectModal(ModalScreen[str | None]):
             Label(f"[bold]{_('Select template')}[/bold]"),
             ListView(
                 *[
-                    ListItem(Label(f"[bold]{name}[/bold]"
-                                  f"  [dim]{' — ' + cat if cat else ''}[/dim]"),
-                             name=name)
+                    ListItem(Label(f"[bold]{name}[/bold]  [dim]{' — ' + cat if cat else ''}[/dim]"), name=name)
                     for name, _stem, cat in self._items
                 ],
                 id="template-list",
@@ -2848,6 +3115,18 @@ class MarkdownEditorApp(App):
         height: 1fr;
     }
 
+    #todos-view {
+        display: none;
+        height: 1fr;
+        padding: 0;
+        background: $background;
+    }
+
+    #todos-view Tree {
+        padding: 0 1;
+        height: 1fr;
+    }
+
     #todos-tree {
         height: 1fr;
         padding: 0 1;
@@ -3150,9 +3429,7 @@ class MarkdownEditorApp(App):
             str(self.config.resolve_notes_path()),
             templates_subfolder=self.config.templates_path,
         )
-        self.parser = MarkdownParser(
-            syntax_theme=self.config.display.get("syntax_theme", "monokai")
-        )
+        self.parser = MarkdownParser(syntax_theme=self.config.display.get("syntax_theme", "monokai"))
         self.register_theme(TV_THEME)
         self.register_theme(W311_THEME)
         user_theme = self.config.get_user_theme()
@@ -3248,15 +3525,11 @@ class MarkdownEditorApp(App):
             callback=lambda result: self._on_color_chosen(result, rel),
         )
 
-    def on_file_tree_directory_context_menu_requested(
-        self, event: FileTree.DirectoryContextMenuRequested
-    ) -> None:
+    def on_file_tree_directory_context_menu_requested(self, event: FileTree.DirectoryContextMenuRequested) -> None:
         """Показать контекстное меню для каталога по правому клику."""
         self.mount(DirectoryContextMenu(event.path, event.x, event.y))
 
-    def on_directory_context_menu_action_chosen(
-        self, event: DirectoryContextMenu.ActionChosen
-    ) -> None:
+    def on_directory_context_menu_action_chosen(self, event: DirectoryContextMenu.ActionChosen) -> None:
         """Обработать выбор действия в контекстном меню каталога."""
         if not self.file_system:
             return
@@ -3273,10 +3546,7 @@ class MarkdownEditorApp(App):
             self._refresh_file_tree()
             self.notify(_("Directory color reset"), severity="information")
 
-
-    def _on_color_chosen(
-        self, result: tuple[str, str] | None, rel: str
-    ) -> None:
+    def _on_color_chosen(self, result: tuple[str, str] | None, rel: str) -> None:
         """Применить цвета из модалки к каталогу."""
         if not result:
             return
@@ -3358,6 +3628,7 @@ class MarkdownEditorApp(App):
                 yield FormView(id="form-view")
                 yield BaseView(id="base-view")
                 yield LinkGraphTree(id="graph-view")
+                yield TodosView(id="todos-view")
 
         yield Static("", id="status-bar")
         yield Footer()
@@ -3381,6 +3652,7 @@ class MarkdownEditorApp(App):
         self.query_one("#form-view", FormView).display = False
         self.query_one("#base-view", BaseView).display = False
         self.query_one("#graph-view", LinkGraphTree).display = False
+        self.query_one("#todos-view", TodosView).display = False
         self.query_one("#search-view", SearchView).display = False
         self._set_sidebar_mode("files")
         self._register_markdown_highlights(editor)
@@ -3403,12 +3675,14 @@ class MarkdownEditorApp(App):
             file_tree.display = False
             tag_cloud.display = False
             search_view.display = True
+
             def _focus_input() -> None:
                 try:
                     inp = search_view.query_one("#search-input", Input)
                     self.set_focus(inp)
                 except Exception as _exc:
                     _log.debug("Suppressed exception", exc_info=_exc)
+
             self.call_after_refresh(_focus_input)
 
     def on_left_ribbon_mode_changed(self, event: LeftRibbon.ModeChanged) -> None:
@@ -3516,10 +3790,9 @@ class MarkdownEditorApp(App):
             viewer.update_content(content, [self._in_note_search.query], idx)
         elif editor.display:
             from textual.widgets.text_area import Selection
+
             query_len = len(self._in_note_search.query)
-            editor.selection = Selection(
-                (match.line, match.column), (match.line, match.column + query_len)
-            )
+            editor.selection = Selection((match.line, match.column), (match.line, match.column + query_len))
             editor.scroll_cursor_visible()
 
     def _update_in_note_status(self) -> None:
@@ -3643,6 +3916,7 @@ class MarkdownEditorApp(App):
         editor = self.query_one("#editor", TextArea)
         if editor.display:
             from textual.widgets.text_area import Selection
+
             editor.selection = Selection((line, start), (line, end))
             editor.scroll_cursor_visible()
             editor.focus()
@@ -3722,9 +3996,7 @@ class MarkdownEditorApp(App):
             import textual as _tx
             from textual._tree_sitter import get_language
 
-            query_path = (
-                Path(_tx.__file__).parent / "tree-sitter" / "highlights" / "markdown.scm"
-            )
+            query_path = Path(_tx.__file__).parent / "tree-sitter" / "highlights" / "markdown.scm"
             query = query_path.read_text(encoding="utf-8")
             query = query.replace(
                 "(code_fence_content) @none",
@@ -3762,6 +4034,7 @@ class MarkdownEditorApp(App):
             self._file_history.append(self.current_file)
         self.current_file = path
         self._load_file()
+        self._highlight_sidebar_route("file", path)
 
     def action_go_back(self) -> None:
         """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра).
@@ -3788,6 +4061,33 @@ class MarkdownEditorApp(App):
         """Показать дерево связей."""
         self.show_graph()
 
+    def on_file_tree_todos_node_selected(self, _: FileTree.TodosNodeSelected) -> None:
+        """Показать правую панель задач при выборе ветки в дереве."""
+        self.show_todos()
+
+    def _highlight_sidebar_route(self, route: str, data: Any = None) -> None:
+        """Move the sidebar cursor to the node matching the active route."""
+        file_tree = self.query_one("#file-tree", FileTree)
+        if route == "todos":
+            node = file_tree._todos_node
+            if node is not None:
+                node.expand()
+                file_tree.build_todos_branch()
+                file_tree.highlight_node(node)
+            return
+        if route == "graph":
+            if file_tree.graph_node_id is not None:
+                for n in file_tree._walk_tree_nodes(file_tree.root):
+                    if id(n) == file_tree.graph_node_id:
+                        file_tree.highlight_node(n)
+                        break
+            return
+        if route == "file" and isinstance(data, Path):
+            for n in file_tree._walk_tree_nodes(file_tree.root):
+                if isinstance(n.data, Path) and n.data == data:
+                    file_tree.highlight_node(n)
+                    break
+
     def show_graph(self) -> None:
         """Show the link graph and hide other main-area views."""
         self._clear_main_area(exclude={"graph-view"})
@@ -3802,25 +4102,39 @@ class MarkdownEditorApp(App):
         graph.focus()
         self.title = "Impactite — " + _("Link graph")
         self._update_status()
+        self._highlight_sidebar_route("graph")
 
     def show_todos(self) -> None:
-        """Focus the todos branch in the file tree."""
-        file_tree = self.query_one("#file-tree", FileTree)
-        todos_node = file_tree._todos_node
-        if todos_node is not None:
-            todos_node.expand()
-            file_tree.build_todos_branch()
-            file_tree.select_node(todos_node)
-            file_tree.focus()
+        """Show the right-pane todos view and refresh its content."""
+        self._clear_main_area(exclude={"todos-view"})
+        todos_view = self.query_one("#todos-view", TodosView)
+        todos_view.display = True
+        todos_view.build_todos(self.file_system.root_path)
+        todos_view.query_one("#todos-view-tree", TodosTree).focus()
+        self.title = "Impactite — " + _("Open todos")
+        self._update_status()
+        self._highlight_sidebar_route("todos")
 
     def action_open_todos(self) -> None:
-        """Focus the todos node in the file tree."""
+        """Activate the right-pane todos view."""
         self.show_todos()
 
-    def on_file_tree_todo_closed(self, event: FileTree.TodoClosed) -> None:
-        """Refresh the todo branch after a todo was closed."""
-        file_tree = self.query_one("#file-tree", FileTree)
-        file_tree.build_todos_branch()
+    def on_todos_view_note_selected(self, event: TodosView.NoteSelected) -> None:
+        """Open the note that contains the selected todo."""
+        if event.path.exists() and event.path.is_file():
+            self._navigate_to(event.path)
+        else:
+            self.notify(_("File not found: {path}", path=str(event.path)), severity="error")
+
+    def on_todos_view_todo_closed(self, event: TodosView.TodoClosed) -> None:
+        """Refresh the todos view and dependent caches after a todo was closed."""
+        todos_view = self.query_one("#todos-view", TodosView)
+        if todos_view.display:
+            todos_view.build_todos(self.file_system.root_path)
+            todos_view.focus()
+        else:
+            file_tree = self.query_one("#file-tree", FileTree)
+            file_tree.build_todos_branch()
         self._rebuild_tag_cache()
         self._update_tag_cloud()
 
@@ -3833,6 +4147,17 @@ class MarkdownEditorApp(App):
                 file_tree.post_message(FileTree.TodoClosed(item))
             else:
                 self.notify(_("Could not close todo"), severity="error")
+
+    def on_file_tree_todo_closed(self, event: FileTree.TodoClosed) -> None:
+        """Refresh the todo branch after a todo was closed."""
+        todos_view = self.query_one("#todos-view", TodosView)
+        if todos_view.display:
+            todos_view.build_todos(self.file_system.root_path)
+            todos_view.focus()
+        file_tree = self.query_one("#file-tree", FileTree)
+        file_tree.build_todos_branch()
+        self._rebuild_tag_cache()
+        self._update_tag_cloud()
 
     def on_link_graph_tree_note_selected(self, event: LinkGraphTree.NoteSelected) -> None:
         """Открыть заметку из дерева связей."""
@@ -3857,16 +4182,21 @@ class MarkdownEditorApp(App):
         viewer = self.query_one("#viewer", MarkdownViewer)
         editor = self.query_one("#editor", TextArea)
         editor_container = self.query_one("#editor-container")
-        form   = self.query_one("#form-view", FormView)
-        base   = self.query_one("#base-view", BaseView)
-        graph  = self.query_one("#graph-view", LinkGraphTree)
+        form = self.query_one("#form-view", FormView)
+        base = self.query_one("#base-view", BaseView)
+        graph = self.query_one("#graph-view", LinkGraphTree)
 
         graph.display = False
+        try:
+            todos_view = self.query_one("#todos-view", TodosView)
+            todos_view.display = False
+        except Exception as _exc:
+            _log.debug("Suppressed exception", exc_info=_exc)
         if self.is_edit_mode:
             viewer.display = False
             editor_container.display = True
-            form.display   = False
-            base.display   = False
+            form.display = False
+            base.display = False
             self._original_content = content
             editor.load_text(content)
             self._apply_editor_syntax_theme(editor)
@@ -3877,23 +4207,22 @@ class MarkdownEditorApp(App):
             if form_def is not None:
                 viewer.display = False
                 editor_container.display = False
-                form.display   = True
-                base.display   = False
-                form.load_form(form_def["catalog"], form_def["fields"],
-                               form_def["destination"])
+                form.display = True
+                base.display = False
+                form.load_form(form_def["catalog"], form_def["fields"], form_def["destination"])
                 form.focus()
             elif base_def is not None:
                 viewer.display = False
                 editor_container.display = False
-                form.display   = False
-                base.display   = True
+                form.display = False
+                base.display = True
                 base.load_base(base_def["query"], base_def["filters"])
                 base.focus()
             else:
                 viewer.display = True
                 editor_container.display = False
-                form.display   = False
-                base.display   = False
+                form.display = False
+                base.display = False
                 viewer.update_content(content, self._search_terms, self._current_match_index)
                 viewer.focus()
 
@@ -3910,6 +4239,7 @@ class MarkdownEditorApp(App):
         line, start, end = self._search_matches[idx]
         editor = self.query_one("#editor", TextArea)
         from textual.widgets.text_area import Selection
+
         editor.selection = Selection((line, start), (line, end))
         editor.scroll_cursor_visible()
 
@@ -4010,12 +4340,12 @@ class MarkdownEditorApp(App):
         if not (0 <= event.source_line < len(lines)):
             return
         old_line = lines[event.source_line]
-        match = re.search(r'\[([ xX])\]', old_line)
+        match = re.search(r"\[([ xX])\]", old_line)
         if not match:
             return
-        current_checked = match.group(1).lower() == 'x'
-        new_char = ' ' if current_checked else 'x'
-        new_line = old_line[:match.start()] + f'[{new_char}]' + old_line[match.end():]
+        current_checked = match.group(1).lower() == "x"
+        new_char = " " if current_checked else "x"
+        new_line = old_line[: match.start()] + f"[{new_char}]" + old_line[match.end() :]
         lines[event.source_line] = new_line
         new_content = "\n".join(lines)
         if self.file_system.write_file(self.current_file, new_content):
@@ -4117,7 +4447,7 @@ class MarkdownEditorApp(App):
                 continue
             old_line = lines[row]
             if prefix.startswith("#"):
-                new_line = re.sub(r'^#+\s*', prefix, old_line)
+                new_line = re.sub(r"^#+\s*", prefix, old_line)
             else:
                 if old_line.startswith(prefix):
                     continue
@@ -4336,6 +4666,7 @@ class MarkdownEditorApp(App):
             try:
                 if path.is_dir():
                     import shutil
+
                     shutil.rmtree(path)
                 else:
                     path.unlink()
@@ -4406,6 +4737,7 @@ class MarkdownEditorApp(App):
             "#form-view": FormView,
             "#base-view": BaseView,
             "#graph-view": LinkGraphTree,
+            "#todos-view": TodosView,
         }
         for selector, widget_type in targets.items():
             if selector[1:] in exclude:

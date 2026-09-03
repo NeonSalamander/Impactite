@@ -19,9 +19,7 @@ from impactite.todo_parser import (
 def sample_vault(tmp_path: Path) -> Path:
     """Create a temporary vault with a few Markdown notes."""
     (tmp_path / ".hidden").mkdir()
-    (tmp_path / ".hidden" / "secret.md").write_text(
-        "- [ ] hidden todo\n", encoding="utf-8"
-    )
+    (tmp_path / ".hidden" / "secret.md").write_text("- [ ] hidden todo\n", encoding="utf-8")
 
     (tmp_path / "project.md").write_text(
         "---\ntags: [work]\n---\n\n"

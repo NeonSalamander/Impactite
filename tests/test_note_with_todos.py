@@ -15,10 +15,7 @@ async def note_with_todos_app(tmp_path: Path):
     root = tmp_path / "notes"
     root.mkdir()
     (root / "project.md").write_text(
-        "# Project\n\n"
-        "- [ ] top level todo\n"
-        "- [x] done todo\n"
-        "  - [ ] nested todo\n",
+        "# Project\n\n- [ ] top level todo\n- [x] done todo\n  - [ ] nested todo\n",
         encoding="utf-8",
     )
     config = Config(notes_path=str(root), language="en")

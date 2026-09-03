@@ -37,11 +37,7 @@ def find_note_files(root_path: str | Path) -> list[Path]:
     root = Path(root_path).expanduser().resolve()
     if not root.exists():
         return []
-    return sorted(
-        p
-        for p in root.rglob("*.md")
-        if not any(part.startswith(".") for part in p.relative_to(root).parts)
-    )
+    return sorted(p for p in root.rglob("*.md") if not any(part.startswith(".") for part in p.relative_to(root).parts))
 
 
 def collect_open_todos(files: list[Path]) -> list[TodoItem]:
@@ -189,9 +185,7 @@ def close_todo(item: TodoItem) -> bool:
         rest = open_match.group(3)
         lines[item.line_number] = f"{prefix} [x] {rest}"
     else:
-        _log.warning(
-            "No open todo marker found on line %d of %s", item.line_number, path
-        )
+        _log.warning("No open todo marker found on line %d of %s", item.line_number, path)
         return False
 
     new_body = newline.join(lines)
