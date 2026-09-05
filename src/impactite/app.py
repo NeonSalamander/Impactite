@@ -196,19 +196,6 @@ class FileTree(Tree):
             self.y = y
             super().__init__()
 
-    class TodoClosed(Message):
-        """Forwarded when a todo was successfully closed."""
-
-        def __init__(self, item: TodoItem) -> None:
-            self.item = item
-            super().__init__()
-
-    class TodosNodeSelected(Message):
-        """Signal that the predefined todos navigation node was selected."""
-
-        def __init__(self) -> None:
-            super().__init__()
-
     def __init__(self, **kwargs):
         super().__init__("", **kwargs)
         self.directory_styles: dict[str, DirectoryStyle] = {}
@@ -217,8 +204,6 @@ class FileTree(Tree):
         self.root_path: Path | None = None
         self.selected_dir: Path | None = None
         self.graph_node_id: int | None = None
-        self.todos_node_id: int | None = None
-        self._todos_node: TreeNode | None = None
         self.auto_expand = False
         self.show_root = False
 
@@ -243,9 +228,6 @@ class FileTree(Tree):
         # Граф связей — предопределённый узел
         graph_node = self.root.add(_("Link graph"), expand=False)
         self.graph_node_id = id(graph_node)
-
-        self._todos_node = self.root.add(_("Open todos"), expand=False, data={"type": "todos-root"})
-        self.todos_node_id = id(self._todos_node)
 
         if favorites:
             existing: list[Path] = []
@@ -330,49 +312,6 @@ class FileTree(Tree):
                 node = parent_node.add(f"{icon} {child.name}", data=child.path)
                 self.file_nodes[id(node)] = child.path
 
-    def build_todos_branch(self) -> None:
-        """Populate (or refresh) the todo file/todo nodes under the todos root."""
-        root = self.root_path
-        if self._todos_node is None or root is None:
-            return
-        self._todos_node.remove_children()
-        todos = collect_open_todos(find_note_files(root))
-        if not todos:
-            self._todos_node.add(_("No open todos"), data={"type": "empty"})
-            return
-
-        self._todos_node.set_label(_("Open todos"))
-
-        grouped: dict[Path, list[TodoItem]] = {}
-        for item in todos:
-            grouped.setdefault(item.file_path, []).append(item)
-
-        for file_path, items in sorted(
-            grouped.items(),
-            key=lambda kv: str(kv[0].relative_to(root)).lower(),
-        ):
-            rel = file_path.relative_to(root)
-            file_node = self._todos_node.add(
-                f"📄 {rel.as_posix()}",
-                data={"type": "todo-file", "path": file_path},
-            )
-            for item in items:
-                file_node.add(
-                    item.line_text,
-                    data={"type": "todo", "item": item},
-                )
-
-    def get_selected_todo_item(self) -> TodoItem | None:
-        """Return the todo item under the cursor, if any."""
-        node = self.cursor_node
-        if node is None:
-            return None
-        data = node.data or {}
-        if data.get("type") != "todo":
-            return None
-        item: TodoItem | None = data.get("item")
-        return item
-
     def _directory_style_for_node(self, node: Any) -> DirectoryStyle | None:
         """Найти сохранённый стиль для узла-каталога."""
         if not self.directory_styles or not self.root_path:
@@ -449,37 +388,12 @@ class FileTree(Tree):
         node_id = id(event.node)
         if node_id == self.graph_node_id:
             self.post_message(self.GraphSelected())
-        elif node_id == self.todos_node_id:
-            event.node.expand()
-            self.build_todos_branch()
-            self.post_message(self.TodosNodeSelected())
         elif node_id in self.file_nodes:
             # Каталог для создания — папка, в которой лежит выбранный файл
             self.selected_dir = self.file_nodes[node_id].parent
             self.post_message(self.FileSelected(self.file_nodes[node_id]))
         elif node_id in self.dir_nodes:
             self.selected_dir = self.dir_nodes[node_id]
-        elif event.node.data:
-            data = event.node.data
-            dtype = data.get("type")
-            if dtype == "todo-file":
-                path = data.get("path")
-                if isinstance(path, Path):
-                    self.post_message(self.FileSelected(path))
-            elif dtype == "todos-root":
-                event.node.expand()
-                self.build_todos_branch()
-
-    def on_key(self, event: events.Key) -> None:
-        """Close a selected todo on space; otherwise use the tree's default behavior."""
-        if event.key == "space":
-            item = self.get_selected_todo_item()
-            if item is not None:
-                event.stop()
-                if close_todo(item):
-                    self.post_message(self.TodoClosed(item))
-                else:
-                    self.notify(_("Could not close todo"), severity="error")
 
 
 class ToolButton(Static):
@@ -1870,22 +1784,52 @@ class BaseView(VerticalScroll):
 
 
 class TodosTree(Tree):
-    """Tree used inside TodosView; space closes a selected todo."""
+    """Tree used inside TodosView; clicking or pressing space closes a todo."""
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("space", "close_todo", "Close todo", show=False, priority=True),
     ]
 
-    class TodoClosed(Message):
-        """Forwarded when a todo was successfully closed."""
-
-        def __init__(self, item: TodoItem) -> None:
-            self.item = item
-            super().__init__()
-
     def __init__(self, label: str, **kwargs) -> None:
         super().__init__(label, **kwargs)
         self.show_root = True
+
+    async def _on_click(self, event: events.Click) -> None:
+        """Close a todo on click; otherwise behave like the default tree."""
+        meta = event.style.meta
+        if "line" in meta and not meta.get("toggle", False):
+            line = meta["line"]
+            node = self.get_node_at_line(line)
+            if node is not None:
+                data = node.data or {}
+                item = data.get("item") if data.get("type") == "todo" else None
+                if item is not None:
+                    event.stop()
+                    event.prevent_default()
+                    self.cursor_line = line
+                    if close_todo(item):
+                        self.post_message(TodosView.TodoClosed(item))
+                    else:
+                        self.notify(_("Could not close todo"), severity="error")
+                    return
+        await super()._on_click(event)
+
+    def action_select_cursor(self) -> None:
+        """Open the note for file nodes; do nothing for todo items.
+
+        Todo items are closed by click or space, not selected.
+        """
+        if self.cursor_line < 0:
+            return
+        try:
+            line = self._tree_lines[self.cursor_line]
+        except IndexError:
+            return
+        node = line.path[-1]
+        data = node.data or {}
+        if data.get("type") == "todo":
+            return
+        super().action_select_cursor()
 
     def action_close_todo(self) -> None:
         """Close the todo under the cursor or fall back to toggling the node."""
@@ -1896,7 +1840,6 @@ class TodosTree(Tree):
         item: TodoItem | None = data.get("item") if data.get("type") == "todo" else None
         if item is not None:
             if close_todo(item):
-                # Bubble the parent view's message type so the App handler fires.
                 self.post_message(TodosView.TodoClosed(item))
             else:
                 self.notify(_("Could not close todo"), severity="error")
@@ -1944,6 +1887,7 @@ class TodosView(Vertical):
         for item in todos:
             grouped.setdefault(item.file_path, []).append(item)
 
+        tree.root.expand()
         for file_path, items in sorted(
             grouped.items(),
             key=lambda kv: str(kv[0].relative_to(root_path)).lower(),
@@ -1958,6 +1902,7 @@ class TodosView(Vertical):
                     item.line_text,
                     data={"type": "todo", "item": item},
                 )
+            file_node.expand()
 
     def get_selected_todo_item(self) -> TodoItem | None:
         """Return the todo item under the cursor, if any."""
@@ -2125,11 +2070,18 @@ class LeftRibbon(Vertical):
         files_btn.tooltip = _("Files")
         search_btn = ToolButton("🔍", id="search-mode-btn", classes="ribbon-btn")
         search_btn.tooltip = _("Search")
+        todos_btn = ToolButton("☐", id="todos-mode-btn", classes="ribbon-btn")
+        todos_btn.tooltip = _("Open todos")
         yield files_btn
         yield search_btn
+        yield todos_btn
 
     def set_active(self, mode: str) -> None:
-        for btn_id, m in (("files-mode-btn", "files"), ("search-mode-btn", "search")):
+        for btn_id, m in (
+            ("files-mode-btn", "files"),
+            ("search-mode-btn", "search"),
+            ("todos-mode-btn", "todos"),
+        ):
             try:
                 btn = self.query_one(f"#{btn_id}", ToolButton)
             except Exception as _exc:
@@ -2141,7 +2093,14 @@ class LeftRibbon(Vertical):
                 btn.remove_class("active")
 
     def on_tool_button_pressed(self, event: ToolButton.Pressed) -> None:
-        mode = "files" if event.button_id == "files-mode-btn" else "search"
+        if event.button_id == "files-mode-btn":
+            mode = "files"
+        elif event.button_id == "search-mode-btn":
+            mode = "search"
+        elif event.button_id == "todos-mode-btn":
+            mode = "todos"
+        else:
+            return
         self.set_active(mode)
         self.post_message(self.ModeChanged(mode))
 
@@ -2813,7 +2772,6 @@ class MarkdownEditorApp(App):
         Binding("c", "set_directory_color", "Color", show=False),
         Binding("shift+c", "reset_directory_color", "Reset color", show=False),
         Binding("backspace", "go_back", "Back", show=False),
-        Binding("space", "close_todo", "Close todo", show=False),
         Binding("f4", "open_todos", "Open todos", show=True),
     ]
 
@@ -2830,12 +2788,12 @@ class MarkdownEditorApp(App):
     #main-container {
         layout: grid;
         grid-size: 4 1;
-        grid-columns: 3 30 1 1fr;
+        grid-columns: 4 30 1 1fr;
         height: 1fr;
     }
 
     #left-ribbon {
-        width: 3;
+        width: 4;
         height: 1fr;
         background: $surface-darken-1;
         border-right: solid $primary-darken-2;
@@ -2843,7 +2801,7 @@ class MarkdownEditorApp(App):
     }
 
     .ribbon-btn {
-        width: 3;
+        width: 4;
         height: 1;
         margin: 0 0 1 0;
         padding: 0;
@@ -3441,7 +3399,7 @@ class MarkdownEditorApp(App):
         self.current_file: Path | None = None
         self.is_edit_mode = False
         self.sidebar_visible = True
-        self.sidebar_mode = "files"  # "files" | "search"
+        self.sidebar_mode = "files"  # "files" | "search" | "todos"
         self.tag_cache: dict[str, list[Path]] = {}
         self.tag_colors: dict[str, str] = {}
         self.note_links: dict[Path, set[Path]] = {}
@@ -3449,6 +3407,7 @@ class MarkdownEditorApp(App):
         self._last_editor_selection = None
         self._file_history: list[Path] = []
         self._return_to_graph: bool = False
+        self._return_to_todos: bool = False
         self.tag_index = TagIndex(self.file_system.root_path)
         self.fts_index = FullTextIndex(self.file_system.root_path)
         self.query_engine = QueryEngine(self.file_system, self.parser, self.tag_index)
@@ -3645,7 +3604,7 @@ class MarkdownEditorApp(App):
 
         sidebar_width = self.config.display.get("sidebar_width", 30)
         main_container = self.query_one("#main-container")
-        main_container.styles.grid_columns = (3, sidebar_width, 1, "1fr")
+        main_container.styles.grid_columns = (4, sidebar_width, 1, "1fr")
 
         editor = self.query_one("#editor", TextArea)
         self.query_one("#editor-container").display = False
@@ -3660,14 +3619,14 @@ class MarkdownEditorApp(App):
         self._update_status()
 
     def _set_sidebar_mode(self, mode: str) -> None:
-        """Переключить боковую панель: дерево файлов или поиск."""
+        """Переключить боковую панель и подсветить активную кнопку ленты."""
         self.sidebar_mode = mode
         ribbon = self.query_one("#left-ribbon", LeftRibbon)
         ribbon.set_active(mode)
         file_tree = self.query_one("#file-tree", FileTree)
         tag_cloud = self.query_one("#tag-cloud-container", Vertical)
         search_view = self.query_one("#search-view", SearchView)
-        if mode == "files":
+        if mode in ("files", "todos"):
             file_tree.display = True
             tag_cloud.display = True
             search_view.display = False
@@ -3687,7 +3646,10 @@ class MarkdownEditorApp(App):
 
     def on_left_ribbon_mode_changed(self, event: LeftRibbon.ModeChanged) -> None:
         """Переключение режима левой панели."""
-        self._set_sidebar_mode(event.mode)
+        if event.mode == "todos":
+            self.show_todos()
+        else:
+            self._set_sidebar_mode(event.mode)
 
     def action_toggle_search_mode(self) -> None:
         """Переключить режим боковой панели (файлы / поиск)."""
@@ -4033,14 +3995,20 @@ class MarkdownEditorApp(App):
         if self.current_file and self.current_file != path:
             self._file_history.append(self.current_file)
         self.current_file = path
+        self._set_sidebar_mode("files")
         self._load_file()
         self._highlight_sidebar_route("file", path)
 
     def action_go_back(self) -> None:
         """Вернуться к предыдущему файлу из истории (Backspace в режиме просмотра).
 
-        Если последний переход был из дерева связей — вернуться в граф."""
+        Если последний переход был из дерева связей — вернуться в граф.
+        Если последний переход был из списка открытых задач — вернуться в него."""
         if self.is_edit_mode:
+            return
+        if self._return_to_todos:
+            self._return_to_todos = False
+            self.show_todos()
             return
         if self._return_to_graph:
             self._return_to_graph = False
@@ -4061,20 +4029,16 @@ class MarkdownEditorApp(App):
         """Показать дерево связей."""
         self.show_graph()
 
-    def on_file_tree_todos_node_selected(self, _: FileTree.TodosNodeSelected) -> None:
-        """Показать правую панель задач при выборе ветки в дереве."""
-        self.show_todos()
-
     def _highlight_sidebar_route(self, route: str, data: Any = None) -> None:
         """Move the sidebar cursor to the node matching the active route."""
-        file_tree = self.query_one("#file-tree", FileTree)
+        ribbon = self.query_one("#left-ribbon", LeftRibbon)
         if route == "todos":
-            node = file_tree._todos_node
-            if node is not None:
-                node.expand()
-                file_tree.build_todos_branch()
-                file_tree.highlight_node(node)
+            ribbon.set_active("todos")
             return
+        # Switch ribbon off the todos button when returning to files/graph.
+        if route in ("graph", "file"):
+            ribbon.set_active("files")
+        file_tree = self.query_one("#file-tree", FileTree)
         if route == "graph":
             if file_tree.graph_node_id is not None:
                 for n in file_tree._walk_tree_nodes(file_tree.root):
@@ -4091,6 +4055,7 @@ class MarkdownEditorApp(App):
     def show_graph(self) -> None:
         """Show the link graph and hide other main-area views."""
         self._clear_main_area(exclude={"graph-view"})
+        self._set_sidebar_mode("files")
         graph = self.query_one("#graph-view", LinkGraphTree)
         graph.display = True
         graph.build_graph(
@@ -4106,11 +4071,13 @@ class MarkdownEditorApp(App):
 
     def show_todos(self) -> None:
         """Show the right-pane todos view and refresh its content."""
+        self._set_sidebar_mode("todos")
         self._clear_main_area(exclude={"todos-view"})
         todos_view = self.query_one("#todos-view", TodosView)
         todos_view.display = True
         todos_view.build_todos(self.file_system.root_path)
-        todos_view.query_one("#todos-view-tree", TodosTree).focus()
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        tree.focus()
         self.title = "Impactite — " + _("Open todos")
         self._update_status()
         self._highlight_sidebar_route("todos")
@@ -4121,6 +4088,7 @@ class MarkdownEditorApp(App):
 
     def on_todos_view_note_selected(self, event: TodosView.NoteSelected) -> None:
         """Open the note that contains the selected todo."""
+        self._return_to_todos = True
         if event.path.exists() and event.path.is_file():
             self._navigate_to(event.path)
         else:
@@ -4132,30 +4100,6 @@ class MarkdownEditorApp(App):
         if todos_view.display:
             todos_view.build_todos(self.file_system.root_path)
             todos_view.focus()
-        else:
-            file_tree = self.query_one("#file-tree", FileTree)
-            file_tree.build_todos_branch()
-        self._rebuild_tag_cache()
-        self._update_tag_cloud()
-
-    def action_close_todo(self) -> None:
-        """Close the currently selected todo in the file tree."""
-        file_tree = self.query_one("#file-tree", FileTree)
-        item = file_tree.get_selected_todo_item()
-        if item is not None:
-            if close_todo(item):
-                file_tree.post_message(FileTree.TodoClosed(item))
-            else:
-                self.notify(_("Could not close todo"), severity="error")
-
-    def on_file_tree_todo_closed(self, event: FileTree.TodoClosed) -> None:
-        """Refresh the todo branch after a todo was closed."""
-        todos_view = self.query_one("#todos-view", TodosView)
-        if todos_view.display:
-            todos_view.build_todos(self.file_system.root_path)
-            todos_view.focus()
-        file_tree = self.query_one("#file-tree", FileTree)
-        file_tree.build_todos_branch()
         self._rebuild_tag_cache()
         self._update_tag_cloud()
 

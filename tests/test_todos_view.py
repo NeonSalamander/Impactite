@@ -126,6 +126,76 @@ async def test_todos_view_sorted_by_relative_path_case_insensitive(todos_app: Ma
 
 
 @pytest.mark.asyncio
+async def test_todos_view_file_nodes_are_expanded_by_default(todos_app: MarkdownEditorApp):
+    """Open todo items are visible without manually expanding file nodes."""
+    app = todos_app
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("f4")
+        await pilot.pause()
+
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        assert tree.root.is_expanded
+        file_nodes = [
+            child for child in tree.root.children
+            if child.data and child.data.get("type") == "todo-file"
+        ]
+        assert all(node.is_expanded for node in file_nodes)
+        all_text = " ".join(_flatten_tree(tree.root))
+        assert "top level todo" in all_text
+        assert "inbox one" in all_text
+
+
+@pytest.mark.asyncio
+async def test_todos_view_click_todo_closes_without_opening_note(
+    todos_app: MarkdownEditorApp,
+):
+    """Clicking a todo closes it but must stay on the todos screen."""
+    from rich.style import Style
+    from textual.events import Click
+
+    app = todos_app
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("f4")
+        await pilot.pause()
+
+        tree = app.query_one("#todos-view-tree", TodosTree)
+        tree.root.expand()
+        for child in tree.root.children:
+            if child.data and child.data.get("type") == "todo-file":
+                child.expand()
+        await pilot.pause()
+
+        line = _first_todo_line(tree)
+        assert line is not None
+        original_file = app.current_file
+        initial_count = len(collect_open_todos(find_note_files(app.file_system.root_path)))
+
+        click_event = Click(
+            widget=tree,
+            x=0,
+            y=0,
+            delta_x=0,
+            delta_y=0,
+            button=1,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            style=Style(meta={"line": line, "toggle": False}),
+        )
+        tree.post_message(click_event)
+        await pilot.pause()
+
+        assert app.current_file == original_file
+        assert (
+            len(collect_open_todos(find_note_files(app.file_system.root_path)))
+            == initial_count - 1
+        )
+
+
+@pytest.mark.asyncio
 async def test_todos_view_close_todo_updates_file_and_view(todos_app: MarkdownEditorApp):
     """Space in the right pane closes the selected todo and refreshes the view."""
     app = todos_app

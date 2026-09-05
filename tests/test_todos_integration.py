@@ -1,4 +1,4 @@
-"""End-to-end tests for the todo branch inside the file tree."""
+"""End-to-end tests for the right-pane Open todos view."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from textual.widgets.tree import TreeNode
 
-from impactite.app import FileTree, MarkdownEditorApp
+from impactite.app import LeftRibbon, MarkdownEditorApp, TodosTree, TodosView
 from impactite.core import Config
 from impactite.todo_parser import (
     TodoItem,
@@ -78,20 +78,26 @@ def _first_todo_node(node: TreeNode) -> TreeNode | None:
     return None
 
 
-def _todos_root(file_tree: FileTree) -> TreeNode | None:
-    return file_tree._todos_node
-
-
 @pytest.mark.asyncio
 async def test_todo_panel_opens_from_binding(todos_app: MarkdownEditorApp):
     app = todos_app
     async with app.run_test() as pilot:
         await pilot.pause()
         await _open_todos_panel(pilot)
-        file_tree = app.query_one("#file-tree", FileTree)
-        todos_root = _todos_root(file_tree)
-        assert todos_root is not None
-        assert todos_root.is_expanded
+        assert app.query_one("#todos-view", TodosView).display is True
+
+
+@pytest.mark.asyncio
+async def test_todo_panel_opens_from_ribbon_button(todos_app: MarkdownEditorApp):
+    app = todos_app
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ribbon = app.query_one("#left-ribbon", LeftRibbon)
+        todos_btn = ribbon.query_one("#todos-mode-btn")
+        await pilot.click(todos_btn)
+        await pilot.pause()
+        assert app.query_one("#todos-view", TodosView).display is True
+        assert "active" in todos_btn.classes
 
 
 @pytest.mark.asyncio
@@ -101,10 +107,9 @@ async def test_todo_panel_shows_open_todos_from_multiple_files(todos_app: Markdo
         await pilot.pause()
         await _open_todos_panel(pilot)
 
-        file_tree = app.query_one("#file-tree", FileTree)
-        todos_root = _todos_root(file_tree)
-        assert todos_root is not None
-        all_text = " ".join(_flatten_tree(todos_root))
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        all_text = " ".join(_flatten_tree(tree.root))
         assert "project todo" in all_text
         assert "top level todo" in all_text
         assert "inbox one" in all_text
@@ -121,14 +126,12 @@ async def test_todo_tree_sorted_by_full_relative_path_case_insensitive(todos_app
         await pilot.pause()
         await _open_todos_panel(pilot)
 
-        file_tree = app.query_one("#file-tree", FileTree)
-        todos_root = _todos_root(file_tree)
-        assert todos_root is not None
-        todos_root.expand()
-        file_tree.build_todos_branch()
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        tree.root.expand()
         file_labels = [
             str(child.label.plain if hasattr(child.label, "plain") else child.label)
-            for child in todos_root.children
+            for child in tree.root.children
             if child.data and child.data.get("type") == "todo-file"
         ]
         expected = [
@@ -144,26 +147,35 @@ async def test_todo_tree_sorted_by_full_relative_path_case_insensitive(todos_app
 @pytest.mark.asyncio
 async def test_close_todo_updates_file_and_tree(todos_app: MarkdownEditorApp):
     app = todos_app
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 40)) as pilot:
         await pilot.pause()
         await _open_todos_panel(pilot)
 
-        file_tree = app.query_one("#file-tree", FileTree)
-        file_tree.focus()
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        tree.focus()
         # Expand nodes so the cursor can land on real todo lines.
         await pilot.pause()
-        todos_root = _todos_root(file_tree)
-        assert todos_root is not None
-        todos_root.expand()
-        file_tree.build_todos_branch()
-        for child in todos_root.children:
+        tree.root.expand()
+        for child in tree.root.children:
             child.expand()
         await pilot.pause()
 
-        todo_node = _first_todo_node(todos_root)
+        # Move the cursor to the first rendered todo line so the space binding
+        # targets an actual todo node.
+        line = None
+        for i, tl in enumerate(tree._tree_lines):
+            if tl.node.data and tl.node.data.get("type") == "todo":
+                line = i
+                break
+        assert line is not None
+        tree.move_cursor_to_line(line)
+        await pilot.pause()
+
+        todo_node = tree.cursor_node
         assert todo_node is not None
-        file_tree.select_node(todo_node)
         assert todo_node.data is not None
+        assert todo_node.data.get("type") == "todo"
         item = cast(TodoItem, todo_node.data["item"])
 
         initial_count = len(collect_open_todos(find_note_files(app.file_system.root_path)))
@@ -175,5 +187,75 @@ async def test_close_todo_updates_file_and_tree(todos_app: MarkdownEditorApp):
 
         assert item not in updated
         closed_text = item.line_text.strip()
-        all_text = " ".join(_flatten_tree(todos_root))
+        all_text = " ".join(_flatten_tree(tree.root))
         assert closed_text not in all_text
+
+
+@pytest.mark.asyncio
+async def test_clicking_todo_closes_it_and_refreshes(todos_app: MarkdownEditorApp):
+    app = todos_app
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        await _open_todos_panel(pilot)
+
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        tree.focus()
+        tree.root.expand()
+        for child in tree.root.children:
+            child.expand()
+        await pilot.pause()
+
+        line = None
+        for i, tl in enumerate(tree._tree_lines):
+            if tl.node.data and tl.node.data.get("type") == "todo":
+                line = i
+                break
+        assert line is not None
+
+        initial_count = len(collect_open_todos(find_note_files(app.file_system.root_path)))
+        await pilot.click(tree, offset=(2, line))
+        await pilot.pause()
+        await pilot.pause()
+
+        updated = collect_open_todos(find_note_files(app.file_system.root_path))
+        assert len(updated) == initial_count - 1
+
+
+@pytest.mark.asyncio
+async def test_closing_last_todo_removes_note_from_tree(todos_app: MarkdownEditorApp):
+    app = todos_app
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.pause()
+        # Leave only one open todo across the whole vault.
+        for p in app.file_system.root_path.rglob("*.md"):
+            if p.name != "urgent.md":
+                text = p.read_text(encoding="utf-8").replace("- [ ]", "- [x]")
+                p.write_text(text, encoding="utf-8")
+
+        await _open_todos_panel(pilot)
+        todos_view = app.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree", TodosTree)
+        tree.root.expand()
+        for child in tree.root.children:
+            child.expand()
+        await pilot.pause()
+
+        todo_node = _first_todo_node(tree.root)
+        assert todo_node is not None
+        # Move the cursor to the rendered line instead of selecting the node,
+        # because selecting a todo node triggers note navigation.
+        for i, tl in enumerate(tree._tree_lines):
+            if tl.node is todo_node:
+                tree.move_cursor_to_line(i)
+                break
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert not collect_open_todos(find_note_files(app.file_system.root_path))
+        file_nodes = [
+            child for child in tree.root.children
+            if child.data and child.data.get("type") == "todo-file"
+        ]
+        assert file_nodes == []

@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from textual.widgets import Tree
 
-from impactite.app import FileTree, MarkdownEditorApp
+from impactite.app import LeftRibbon, MarkdownEditorApp, TodosView
 from impactite.core import Config
 from impactite.i18n import set_language, t
 
@@ -39,20 +38,13 @@ def test_german_open_todos_translation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sidebar_todos_node_label_in_russian(todos_app_ru: MarkdownEditorApp) -> None:
+async def test_ribbon_todos_button_tooltip_in_russian(todos_app_ru: MarkdownEditorApp) -> None:
     async with todos_app_ru.run_test() as pilot:
         await pilot.pause()
-        # Trigger a file-tree refresh so labels are rebuilt after set_language("ru").
-        todos_app_ru._refresh_file_tree()
-        await pilot.pause()
-        file_tree = todos_app_ru.query_one("#file-tree", Tree)
-        labels = [
-            str(child.label.plain if hasattr(child.label, "plain") else child.label)
-            for child in file_tree.root.children
-        ]
-        # After a refresh the predefined nodes are rebuilt using the current
-        # language, so the Russian translation should now appear.
-        assert any("Открытые задачи" in label for label in labels), labels
+        ribbon = todos_app_ru.query_one("#left-ribbon", LeftRibbon)
+        todos_btn = ribbon.query_one("#todos-mode-btn")
+        # The button tooltip is set via the translated i18n key.
+        assert todos_btn.tooltip == "Открытые задачи"
 
 
 @pytest.mark.asyncio
@@ -66,45 +58,47 @@ async def test_todos_view_title_in_russian(todos_app_ru: MarkdownEditorApp) -> N
 
 
 @pytest.mark.asyncio
-async def test_todos_active_highlight_moves_cursor(todos_app_ru: MarkdownEditorApp) -> None:
+async def test_todos_ribbon_button_click_shows_pane(todos_app_ru: MarkdownEditorApp) -> None:
     async with todos_app_ru.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("f4")
+        ribbon = todos_app_ru.query_one("#left-ribbon", LeftRibbon)
+        todos_btn = ribbon.query_one("#todos-mode-btn")
+        await pilot.click(todos_btn)
         await pilot.pause()
-        file_tree = todos_app_ru.query_one("#file-tree", Tree)
-        assert file_tree.cursor_node is not None
-        assert file_tree.cursor_node.data is not None
-        assert file_tree.cursor_node.data.get("type") == "todos-root"
-        assert todos_app_ru.query_one("#todos-view").display is True
+        assert todos_app_ru.query_one("#todos-view", TodosView).display is True
+        assert "active" in todos_btn.classes
 
 
 @pytest.mark.asyncio
 async def test_todos_active_highlight_removed_on_file_select(todos_app_ru: MarkdownEditorApp) -> None:
     async with todos_app_ru.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("f4")
+        ribbon = todos_app_ru.query_one("#left-ribbon", LeftRibbon)
+        await pilot.click(ribbon.query_one("#todos-mode-btn"))
         await pilot.pause()
 
-        file_tree = todos_app_ru.query_one("#file-tree", FileTree)
-        # Start with the todos root highlighted.
-        assert file_tree.cursor_node is not None
-        assert file_tree.cursor_node.data.get("type") == "todos-root"
+        todos_btn = ribbon.query_one("#todos-mode-btn")
+        assert "active" in todos_btn.classes
 
-        # Move the highlight to a regular file node without raising a selection
-        # event, which mimics what _highlight_sidebar_route("file") does.
+        # Opening a note from the todos view should switch the ribbon back to files.
+        todos_view = todos_app_ru.query_one("#todos-view", TodosView)
+        tree = todos_view.query_one("#todos-view-tree")
         file_node = None
-        for node in file_tree._walk_tree_nodes(file_tree.root):
-            if isinstance(node.data, Path) and node.data.is_file():
-                file_node = node
+        for child in tree.root.children:
+            if child.data and child.data.get("type") == "todo-file":
+                file_node = child
                 break
         assert file_node is not None
-        file_tree.highlight_node(file_node)
+        tree.select_node(file_node)
+        await pilot.press("enter")
         await pilot.pause()
 
-        assert file_tree.cursor_node is not None
-        assert file_tree.cursor_node == file_node
-        # Highlight is now on a file node, not the todos root.
-        assert file_tree.cursor_node.data is not file_tree._todos_node.data
+        assert todos_app_ru.current_file is not None
+        assert todos_app_ru.query_one("#viewer").display is True
+        assert todos_app_ru.query_one("#todos-view").display is False
+        assert "active" not in todos_btn.classes
+        files_btn = ribbon.query_one("#files-mode-btn")
+        assert "active" in files_btn.classes
 
 
 @pytest.mark.asyncio
